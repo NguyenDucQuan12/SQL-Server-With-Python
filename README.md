@@ -165,6 +165,17 @@ Việc này giúp ta dễ dàng quản lý luồng ghi, ít khả năng xung đ�
 
 Ví dụ về một luồng ghi dữ liệu, 3-4 nguồn cung cấp thông tin có thể xem [tại đây](Code/insert_data_to_SQL_Server_using_thread_and_queue.py).  
 
+Để sử dụng được code mẫu trên bạn cần tạo CSDL mẫu như hình bên dưới:  
+
+> Database Name: `TestDB`  
+> Table: `TestTable`  
+
+![alt text](Image/TestDB_tree.png)
+
+Và `TestTable` có cấu trúc như sau:  
+
+![alt text](Image/TestTable_tree.png)
+
 >  Tuy nhiên việc xử lý luồng ghi dữ liệu vẫn đang còn đơn giản, chưa xử lý tốt, vì vậy cần chỉnh sửa thêm, không thể sử dụng code trực tiếp được cho các dự án lớn
 
 ### 2. Sử dụng 2 luồng ghi dữ liệu
