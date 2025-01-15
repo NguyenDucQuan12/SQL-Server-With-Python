@@ -1,6 +1,6 @@
 # SQL-Server-With-Python
 
-# 1. SQL Server
+# I. SQL Server
 
 ## 1. Cài đặt SQL Server và SQL Server Manager Studio
 Tải SQL Server từ trang chủ Microsoft [tại đây](https://www.microsoft.com/en-us/sql-server/sql-server-downloads). Mình đang dùng với phiên bản `Express`. Tải về và cài đặt theo mục `Basic`.  
@@ -12,11 +12,11 @@ Sau khi cài xong `SQL Server` thì tiếp tục tải và cài đặt `SQL Serv
 ![alt text](Image/download_ssms.png)
 
 Sau đó mở `SSMS` lên và kích hoạt một số chức năng bằng cách sau:  
-Bước 1 mở `Server Properties` bằng cách click chuột phải vào tên server và chọn `Properties`  
+Bước 1: Mở `Server Properties` bằng cách click chuột phải vào tên server và chọn `Properties`  
 
 ![alt text](Image/open_server_properties.png)
 
-Bước 2 cho phép đăng nhập SQL Server bằng tài khoản:  
+Bước 2: Cho phép đăng nhập SQL Server bằng tài khoản:  
 
 ![alt text](Image/active_SQL_login.png)
 
@@ -43,7 +43,7 @@ Bước 1: Mở kết nối phương thức `TCP/IP`.
 
 ![alt text](Image/enable_tcpip_sqlserrver.png)
 
-Và cấu hình địa chỉ để có thể kết nối bằng cách vào tab `Addresses --> IPAll` và cấu hình 2 thông số `TCP Dynamic Ports` và `TCP Port` như ảnh bên dưới.    
+Và cấu hình địa chỉ để có thể kết nối bằng cách vào tab `IP Addresses --> IPAll` và cấu hình 2 thông số `TCP Dynamic Ports` và `TCP Port` như ảnh bên dưới.    
 
 ![alt text](Image/configuration_ip_addresses_sql_server.png)
 
@@ -55,6 +55,25 @@ Và cấu hình địa chỉ để có thể kết nối bằng cách vào tab `
 
 ![alt text](Image/login_ssms_use_sa_account.png)
 
-Nếu bạn đăng nhập thành công thì đã haofn tất các bước cấu hình SQL Server.  
+Nếu bạn đăng nhập thành công thì đã hoàn tất các bước cấu hình SQL Server.  
 
-# 2. Kết nối SQL Server bằng Python
+# II. Kết nối SQL Server bằng Python
+
+## 1. Cài đặt driver và thư viện
+
+Để sử dụng `SQL Server` với `Python` thì chúng ta cần có driver chính thức từ Microsoft có tên là `ODBC Driver` và thư viện `pyodbc`.  
+Đầu tiên cài đặt `ODBC Driver` ta cần lưu ý như sau. Ta phải biết được phiên bản driver mà ta vừa cài đặt là bao nhiêu để khi kết nối ta phải thông báo rõ với python là ta sử dụng phiên bản đó. Ta có thể tải về từ trang chủ chính thức đến từ Microsof [tại đây](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server?view=sql-server-ver16).  
+
+![alt text](Image/download_odbc_driver.png)
+
+Có thể thấy phiên bản driver mà mình vửa tải về là `18`. Hoặc có thể cài đặt phiên bản mình đã tai về [tại đây](Setup/msodbcsql.msi). Sau đó cài đặt `ODBC Driver` là hoàn tất.  
+Thư viện `pyodbc` sẽ giúp chúng ta kết nối `Python` cùng với `SQL Server` thông qua `ODBC Driver`. Ta cần cài đặt thư viện này cho dự án của chúng ta bằng câu lệnh sau:  
+
+```python
+pip install pyodbc
+```
+Cài đặt thư viện nên cài trong môi trường ảo để có môi trường làm việc chuyên nghiệp và sạch sẽ hơn. Chi tiết về môi trường ảo trong Python xem [tại đây](https://github.com/NguyenDucQuan12/virtual_environment_python)
+
+![alt text](Image/install_pyodbc_using_pip.png)
+
+Tham khảo chi tiết thư viện `pyodbc` [tại đây](https://pypi.org/project/pyodbc/)
