@@ -47,7 +47,7 @@ Và cấu hình địa chỉ để có thể kết nối bằng cách vào tab `
 
 ![alt text](Image/configuration_ip_addresses_sql_server.png)
 
-Để hoàn tất cài đặt thì bạn cần `khởi động lại SQL Serve` bằng cách như hướng dẫn bên dưới:  
+Để hoàn tất cài đặt thì bạn cần `khởi động lại SQL Server` bằng cách như hướng dẫn bên dưới:  
 
 ![alt text](Image/restart_SQL_Server.png)
 
@@ -77,3 +77,96 @@ Cài đặt thư viện nên cài trong môi trường ảo để có môi trư�
 ![alt text](Image/install_pyodbc_using_pip.png)
 
 Tham khảo chi tiết thư viện `pyodbc` [tại đây](https://pypi.org/project/pyodbc/)
+
+## 2. Kết nối CSDL
+
+Để kết nối tới CSDL trong SQL Server thì ta cần một `chuỗi kết nối` có cú pháp như sau:  
+
+```python 
+connection_string = (
+        "DRIVER={ODBC Driver 18 for SQL Server};"
+        "SERVER=localhost;"
+        "DATABASE=TestDB;"
+        "UID=sa;"
+        "PWD=123456789;"
+        "TrustServerCertificate=yes;"
+    )
+```
+Có một số chú ý như sau:  
+
+> `DRIVER={ODBC Driver 18 for SQL Server};` ta thay thế nó bằng phiên bản mà ta đã cài `ODBC Driver` trước đó. Đây mình phiên bản `18`  
+> `SERVER=localhost;` sẽ là địa chỉ IP của máy tính chứa DB `ví dụ: "192.168.10.13"` hoặc để `localhost` cho chính máy đang chạy phần mềm  
+> `DATABASE=TestDB;` sẽ là tên CSDL cần truy cập  
+> `UID PWD` sẽ là thông tin đăng nhập  
+> `TrustServerCertificate=yes;` thiếu chuỗi này sẽ không được đăng nhập  
+
+Sau đó ta truyền chuối kết nối để có thể thao tác với `Database`. Ví dụ như sau:  
+
+```python
+import pyodbc
+from contextlib import contextmanager
+
+# Kết nối tới CSDL trước khi làm gì đó
+@contextmanager
+def open_db_connection(self, commit=False):
+    try:
+        self.connection = pyodbc.connect(self.connection_string)
+        self.cursor = self.connection.cursor()
+        yield self.cursor # tương tự return nhưng nó sẽ lưu trữ các trạng thái của biến cục bộ
+        # Thường đi kèm với hàm with, trả về cursor và tạm dừng ở đây để thực hiện các lệnh trong with trước
+        # Sau khi kết thúc các lệnh trong with sẽ tiếp tục thực hiện các dòng mã bên dưới
+        # Nếu không có lỗi thì sẽ commit (xác nhận các giao dịch thêm, sửa, xóa là hợp lệ và lưu vào CSDL)
+        # Hoặc tự động rollback nếu không cài tham số commit = True
+        if commit:
+            self.cursor.execute("COMMIT")
+        else:
+            self.cursor.execute("ROLLBACK")
+
+    except pyodbc.DatabaseError as err:
+        
+        # Nếu có ngoại lệ, lỗi, ... xảy ra trong khối lệnh with ngay lập tức rollback (quay trở lại) trước khi lệnh with chạy
+        error= err.args[0]
+        sys.stderr.write(str(error))
+        error_cannot_connect(cannot_write_db)
+        self.cursor.execute("ROLLBACK") 
+        raise err
+
+    finally:
+        # Cuối cùng luôn đóng kết nối với CSDL
+        self.cursor.close()
+        self.connection.close()
+
+# Hàm gọi lệnh truy vấn đến SQL Server
+def get_number_vehicle(self):
+    get_number_vehicle_query = "SELECT COUNT(License_Plate_Number)\
+                                    FROM License_Plate\
+                                    WHERE Status = 'IN' AND Result = 'OK';"
+    with self.open_db_connection(commit = False) as cursor:
+        cursor.execute(get_number_vehicle_query)
+        number_vehicle = cursor.fetchone() # lấy 1 hàng dữ liệu, gọi thêm 1 lần nữa là lấy hàng tiếp theo, fetchall là lấy hết các hàng dữ liệu
+        number_vehicle = number_vehicle[0]
+        return number_vehicle
+```
+
+## 3. Truy vấn CSDL
+
+Khi chúng ta nhận dữ liệu liên tục từ nhiều nguồn (3-4 tín hiệu truyền đến). Để tránh xung đột khi ghi dữ liệu vào SQL Server thì ta chỉ nên `sử dụng một số ít luồng` thực hiện ghi xuống CSDL. Vì thế phương pháp tốt nhất là ta sử dụng `Queue và Thread` cho việc này.  
+
+Cụ thể như sau:  
+
+- Các nguồn dữ liệu (3 - 4 nguồn) sẽ cung cấp dữ liệu để ghi vào CSDL  
+- Các dữ liệu này sẽ được đưa lần lượt vào hàng đợi  
+- Ta mở một luồng riêng chuyên chịu trách nhiệm ghi dữ liệu vào SQL Server  
+- Luồng này sẽ lấy dữ liệu lần lượt từ hàng đợi và ghi nó vào SQL Server  
+
+### 1. Sử dụng 1 luồng chuyên ghi dữ liệu
+
+Việc này giúp ta dễ dàng quản lý luồng ghi, ít khả năng xung đột, sai sót. Số lượng kết nối đến CSDL chỉ là 1 luồng (hoặc có thể thêm 2, 3 luồng nữa). Tuy nhiên ta cần có thêm cơ chế quản lý luồng `(Thread)` để dừng luồng, xử lý khi luồng xảy ra lỗi một cách an toàn, và việc ghi dữ liệu sẽ có độ trễ bởi vì chỉ có 1 luồng ghi dữ liệu mà tận 3,4 nguồn dữ liệu đẩy dữ liệu vào hàng đợi.  
+
+Ví dụ về một luồng ghi dữ liệu, 3-4 nguồn cung cấp thông tin có thể xem [tại đây](Code/insert_data_to_SQL_Server_using_thread_and_queue.py).  
+
+>  Tuy nhiên việc xử lý luồng ghi dữ liệu vẫn đang còn đơn giản, chưa xử lý tốt, vì vậy cần chỉnh sửa thêm, không thể sử dụng code trực tiếp được cho các dự án lớn
+
+### 2. Sử dụng 2 luồng ghi dữ liệu
+
+Nếu việc chỉ sử dụng 1 luồng ghi dữ liệu chưa đáp ứng được tốc độ thì bạn có thể tăng lên 2 luồng cùng ghi dữ liệu
