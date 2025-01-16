@@ -76,7 +76,19 @@ Cài đặt thư viện nên cài trong môi trường ảo để có môi trư�
 
 ![alt text](Image/install_pyodbc_using_pip.png)
 
-Tham khảo chi tiết thư viện `pyodbc` [tại đây](https://pypi.org/project/pyodbc/)
+Tham khảo chi tiết thư viện `pyodbc` [tại đây](https://pypi.org/project/pyodbc/)  
+
+Sau khi có thư viện `pyodbc`. Có thể kiểm tra phiên bản `ODBC Driver` đã cài trên máy bằng câu lệnh sau:  
+```python
+import pyodbc
+# LIST OF INSTALLED DATA SOURCES (DSNs)
+print(pyodbc.dataSources())
+
+# LIST OF INSTALLED DRIVERS
+print(pyodbc.drivers())
+```
+
+![alt text](Image/check_version_odbc_driver_using_python.png)
 
 ## 2. Kết nối CSDL
 
