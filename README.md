@@ -212,6 +212,8 @@ Có thể xem ví dụ sử dụng `python` thao tác với CSDL [tại đây](C
 
 Lưu ý để sử dụng code này ta cần thêm 1 cột `ID` có giá trị tự tăng lên để định danh cho các hàng trong dữ liệu, tránh trường hợp các hàng có giá trị trùng nhau. Ta sử dụng lệnh sau để thêm cột này vào CSDL.  
 
+![alt text](Image/add_column_to_SQL.png)
+
 ```SQL Server
 ALTER TABLE TestTable
 ADD ID INT IDENTITY(1,1) NOT NULL
