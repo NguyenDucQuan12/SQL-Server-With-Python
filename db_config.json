@@ -1,0 +1,11 @@
+{
+    "connections": [
+        {
+            "name": "Test",
+            "server": "localhost",
+            "database": "TestDB",
+            "username": "sa",
+            "password": "MTIzNDU2Nzg5"
+        }
+    ]
+}

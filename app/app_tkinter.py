@@ -1,7 +1,7 @@
-import tkinter as tk
+import tkinter as tk  
 from tkinter import filedialog, messagebox, ttk
-import pandas as pd
-from sqlalchemy import create_engine, text, URL
+import pandas as pd # pip install pandas
+from sqlalchemy import create_engine, text, URL  # pip install SQLAlchemy
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.orm import declarative_base  # Cập nhật import để tránh cảnh báo
 import logging
