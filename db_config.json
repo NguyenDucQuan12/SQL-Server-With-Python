@@ -6,6 +6,13 @@
             "database": "TestDB",
             "username": "sa",
             "password": "MTIzNDU2Nzg5"
+        },
+        {
+            "name": "TVC Canteen",
+            "server": "localhost",
+            "database": "TVC_Canteen",
+            "username": "sa",
+            "password": "MTIzNDU2Nzg5"
         }
     ]
 }

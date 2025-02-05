@@ -113,6 +113,9 @@ class LoginWindow(ctk.CTkToplevel):
             self.frame_new_connection.grid_forget()  # Ẩn frame nhập thông tin
 
     def attempt_login(self):
+        """
+        Đăng nhập vào SQL Server để lấy thông tin Bảng trong SQL Server
+        """
         selected = self.combobox_connections.get()
         if selected == "Thêm CSDL Mới":
             # Lấy thông tin từ các Entry
@@ -187,7 +190,7 @@ class LoginWindow(ctk.CTkToplevel):
                 logger.info(f"Đã thêm cấu hình kết nối '{name}' vào file.")
 
                 # Gọi callback để mở giao diện chính
-                self.master.destroy()
+                self.destroy()
                 self.on_success(engine)
             except Exception as e:
                 logger.error(f"Lỗi khi kết nối đến SQL Server: {e}")
@@ -246,17 +249,15 @@ class LoginWindow(ctk.CTkToplevel):
                 logger.info(f"Kết nối đến SQL Server thành công với cấu hình '{selected}'.")
 
                 # Gọi callback để mở giao diện chính
-                self.master.destroy()
+                self.destroy()
                 self.on_success(engine)
             except Exception as e:
                 logger.error(f"Lỗi khi kết nối đến SQL Server: {e}")
                 messagebox.showerror("Lỗi", f"Lỗi khi kết nối đến SQL Server: {e}")
 
-class ExcelToSQLApp(ctk.CTkFrame):
-    def __init__(self, root, engine):
-        self.root = root
-        self.root.title("Excel to SQL Server Mapper")
-        self.root.geometry("1200x800")
+class ExcelToSQLWindow(ctk.CTkFrame):
+    def __init__(self, parent, engine = None):
+        super().__init__(parent)
 
         self.engine = engine
         self.SessionLocal = get_db_session(engine)
@@ -274,9 +275,6 @@ class ExcelToSQLApp(ctk.CTkFrame):
         # Tệp lưu mapping
         self.mapping_file = MAPPING_FILE
 
-        # Bind sự kiện đóng cửa sổ
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-
         # Tạo các phần của giao diện
         self.create_widgets()
 
@@ -285,47 +283,39 @@ class ExcelToSQLApp(ctk.CTkFrame):
 
     def create_widgets(self):
         # Frame đăng xuất
-        frame_logout = ctk.CTkFrame(self.root)
+        frame_logout = ctk.CTkFrame(self)
         frame_logout.pack(fill="x", padx=10, pady=5)
 
         btn_logout = ctk.CTkButton(frame_logout, text="Đăng Xuất", command=self.logout, width=10)
         btn_logout.pack(side="right")
 
         # Frame chọn bảng
-        frame_table = ctk.CTkFrame(self.root)
+        frame_table = ctk.CTkFrame(self)
         frame_table.pack(pady=10)
 
         ctk.CTkLabel(frame_table, text="Chọn Bảng SQL Server:", font=('Arial', 12)).pack(side="left", padx=5)
 
-        self.combobox_tables = ctk.CTkComboBox(frame_table, values=[], state="readonly", width=40)
+        self.combobox_tables = ctk.CTkComboBox(frame_table, values=[], state="readonly", command= self.on_table_select)
         self.combobox_tables.pack(side="left", padx=5)
-        self.combobox_tables.bind("<<ComboboxSelected>>", self.on_table_select)
 
         # Frame chọn file Excel
-        frame_select = ctk.CTkFrame(self.root)
+        frame_select = ctk.CTkFrame(self)
         frame_select.pack(pady=10)
 
         btn_select = ctk.CTkButton(frame_select, text="Chọn File Excel", command=self.select_excel, width=20)
         btn_select.pack()
 
         # Frame hiển thị dữ liệu mẫu từ Excel
-        frame_sample = ctk.CTkLabelFrame(self.root, text="Dữ liệu mẫu từ Excel", padx=10, pady=10)
+        frame_sample = ctk.CTkFrame(self)
         frame_sample.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Treeview để hiển thị dữ liệu mẫu
-        self.tree_sample = ttk.Treeview(frame_sample, show='headings')
-        self.tree_sample.pack(fill="both", expand=True, side="left")
+        self.create_tree_view_table(parent= frame_sample)
 
-        # Scrollbar cho Treeview dữ liệu mẫu
-        scrollbar_sample = ttk.Scrollbar(frame_sample, orient="vertical", command=self.tree_sample.yview)
-        self.tree_sample.configure(yscrollcommand=scrollbar_sample.set)
-        scrollbar_sample.pack(side="right", fill="y")
-
-        # Định nghĩa tag 'missing' để bôi màu các cell chứa null/Nan
-        self.tree_sample.tag_configure('missing', foreground='red')  # Màu đỏ cho văn bản thiếu
+        # Lấy danh sách bảng từ SQL Server
+        self.get_sql_tables()
 
         # Frame thao tác
-        frame_actions = ctk.CTkFrame(self.root)
+        frame_actions = ctk.CTkFrame(self)
         frame_actions.pack(pady=10)
 
         btn_map = ctk.CTkButton(frame_actions, text="Map Cột", command=self.map_columns, width=15)
@@ -333,9 +323,55 @@ class ExcelToSQLApp(ctk.CTkFrame):
 
         btn_insert = ctk.CTkButton(frame_actions, text="Ghi Dữ Liệu", command=self.insert_data, width=15)
         btn_insert.pack(side="left", padx=10)
+ 
+    def create_tree_view_table(self, parent):
+        # Tạo style cho Treeview (ttk)
+        style = ttk.Style()
+        style.theme_use("clam")
 
-        # Lấy danh sách bảng từ SQL Server
-        self.get_sql_tables()
+        # Tạo style cho Treeview
+        style.configure(
+            "Treeview",
+            background="white",
+            foreground="black",
+            rowheight=25,
+            fieldbackground="#f0f0f0",  # Màu nền các ô trong Treeview
+            bordercolor="#343638",
+            borderwidth=1
+        )
+        style.map("Treeview", background=[('selected', '#4CAF50')])  # Màu nền khi chọn dòng
+
+        # Đặt màu nền cho tiêu đề cột
+        style.configure("Treeview.Heading",
+                        background="#565b5e",  # Màu nền của tiêu đề
+                        foreground="white",    # Màu chữ của tiêu đề
+                        relief="flat")
+        
+        style.map("Treeview.Heading", background=[('active', '#3484F0')])  # Màu nền của tiêu đề khi hover
+        # Thêm đường viền khi chọn dòng
+        style.map("Treeview", background=[('selected', '#4CAF50')])
+
+        # Tạo Treeview
+        self.treeview = ttk.Treeview(
+            parent,
+            columns=(),
+            show="headings",
+            height=10
+        )
+
+        # Đặt Treeview xuống hàng (row=1) để không đè tiêu đề
+        self.treeview.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+
+        self.treeview.tag_configure('missing', foreground='red')  # Màu đỏ cho văn bản thiếu
+
+        # Thêm scrollbar
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.treeview.yview)
+        self.treeview.configure(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=1, column=1, sticky="ns", pady=10)
+
+        # Cho phép frame giãn theo chiều ngang/chiều dọc
+        parent.grid_rowconfigure(1, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
 
     def on_closing(self):
         try:
@@ -349,15 +385,18 @@ class ExcelToSQLApp(ctk.CTkFrame):
                 logger.info("Đã đóng engine SQLAlchemy.")
         except Exception as e:
             logger.error(f"Lỗi khi đóng tài nguyên: {e}")
-        self.root.destroy()
+        # self.destroy()   # Xóa tất cả frame ở đây, chỉ giữ lại cửa sổ chính
 
     def logout(self):
         confirm = messagebox.askyesno("Đăng Xuất", "Bạn có chắc chắn muốn đăng xuất?")
         if confirm:
             self.on_closing()
-            main()
+            # main()
 
     def get_sql_tables(self):
+        """
+        Lấy danh sách các bảng nằm trong CSDL SQL Server
+        """
         try:
             query = """
             SELECT TABLE_NAME
@@ -366,9 +405,10 @@ class ExcelToSQLApp(ctk.CTkFrame):
             """
             tables_df = pd.read_sql(query, con=self.engine)
             tables = tables_df['TABLE_NAME'].tolist()
-            self.combobox_tables['values'] = tables
+            # Nếu lấy được các bảng thì hiển thị nó để lựa chọn
             if tables:
-                self.combobox_tables.current(0)
+                self.combobox_tables.set(tables[0])
+                self.combobox_tables.configure(values=tables)
                 self.on_table_select(None)
         except Exception as e:
             logger.error(f"Lỗi khi lấy danh sách bảng từ SQL Server: {e}")
@@ -381,14 +421,47 @@ class ExcelToSQLApp(ctk.CTkFrame):
             logger.info(f"Đã chọn bảng: {selected}")
             # Lấy danh sách các cột từ bảng đã chọn
             self.sql_columns = self.get_sql_columns(selected_table=selected)
+
+            # Lấy dữ liệu mẫu từ bảng
+            self.load_sample_data(selected_table=selected)
             # Reset mapping và default_values
             self.mapping = {}
             self.default_values = {}
             # Nếu đã có mapping cho bảng này, load nó
             self.load_mapping()
             # Hiển thị dữ liệu mẫu nếu đã chọn file Excel
-            if self.df is not None:
-                self.display_sample_data()
+            # if self.df is not None:
+            #     self.display_sample_data()
+
+    def load_sample_data(self, selected_table):
+        try:
+            # Lấy 100 dòng dữ liệu mẫu từ bảng đã chọn
+            query = f"SELECT TOP 100 * FROM {selected_table}"
+            sample_data_df = pd.read_sql(query, con=self.engine)
+            
+            # Lấy tên các cột của bảng
+            columns = sample_data_df.columns.tolist()
+            
+            # Cập nhật các cột trong Treeview
+            self.treeview["columns"] = columns
+            for col in columns:
+                self.treeview.heading(col, text=col)
+                self.treeview.column(col, width=150, anchor="w")  # Thiết lập chiều rộng cột và canh lề
+
+            # Xóa các hàng cũ trong Treeview
+            for row in self.treeview.get_children():
+                self.treeview.delete(row)
+
+            # Thêm dữ liệu mẫu vào Treeview
+            for _, row in sample_data_df.iterrows():
+                row_values = [str(value) if not pd.isna(value) else '' for value in row]
+                self.treeview.insert('', 'end', values=row_values)
+
+            logger.info(f"Đã lấy dữ liệu mẫu từ bảng '{selected_table}'.")
+
+        except Exception as e:
+            logger.error(f"Lỗi khi lấy dữ liệu mẫu từ bảng '{selected_table}': {e}")
+            messagebox.showerror("Lỗi", f"Lỗi khi lấy dữ liệu mẫu từ bảng '{selected_table}': {e}")
 
     def select_excel(self):
         # Mở hộp thoại chọn file
@@ -439,29 +512,33 @@ class ExcelToSQLApp(ctk.CTkFrame):
 
     def display_sample_data(self):
         if self.df is not None:
-            # Xóa các cột hiện tại trong tree_sample
-            for col in self.tree_sample["columns"]:
-                self.tree_sample.heading(col, text="")
-                self.tree_sample.column(col, width=100)
-            self.tree_sample["columns"] = list(self.df.columns)
+            # Xóa các cột hiện tại trong treeview
+            for col in self.treeview["columns"]:
+                self.treeview.heading(col, text="")
+                self.treeview.column(col, width=100)
+            self.treeview["columns"] = list(self.df.columns)
 
             # Thiết lập tiêu đề cột
             for col in self.df.columns:
-                self.tree_sample.heading(col, text=col)
-                self.tree_sample.column(col, width=150)
+                self.treeview.heading(col, text=col)
+                self.treeview.column(col, width=150)
 
-            # Xóa các hàng hiện tại
-            for row in self.tree_sample.get_children():
-                self.tree_sample.delete(row)
+            # Xóa các hàng hiện tại trong Treeview
+            for row in self.treeview.get_children():
+                self.treeview.delete(row)
 
             # Thêm tất cả dữ liệu vào Treeview 
-            for _, row in self.df.iterrows(): # Kiểm tra và hiển thị các giá trị Unicode 
+            for _, row in self.df.iterrows():
+                # Kiểm tra và hiển thị các giá trị Unicode 
                 row_values = [str(value) if not pd.isna(value) else '' for value in row]
-                            # Kiểm tra xem dòng có chứa null/Nan không
-            if any(pd.isna(value) for value in row):
-                self.tree_sample.insert('', 'end', values=row_values, tags=('missing',))
-            else:
-                self.tree_sample.insert('', 'end', values=row_values)
+                
+                # Kiểm tra xem dòng có chứa null/NaN không, nếu có thì hiển thị dòng đó với màu đỏ
+                if any(pd.isna(value) for value in row):
+                    self.treeview.insert('', 'end', values=row_values, tags=('missing',))
+                else:
+                    self.treeview.insert('', 'end', values=row_values)
+            
+            logger.info("Đã hiển thị dữ liệu mẫu.")
 
     def map_columns(self):
         if not self.excel_columns:
@@ -473,128 +550,8 @@ class ExcelToSQLApp(ctk.CTkFrame):
             return
 
         # Tạo một cửa sổ mới để map cột
-        mapping_window = ctk.CTkToplevel(self.root)
-        mapping_window.title(f"Map Cột Excel với SQL Server - Bảng '{self.selected_table}'")
-        mapping_window.geometry("1000x700")  # Increased height to accommodate primary key selection
-
-        # Bind sự kiện đóng cửa sổ mapping_window
-        mapping_window.protocol("WM_DELETE_WINDOW", lambda: mapping_window.destroy())
-
-        # Tạo một canvas và một scrollbar cho cửa sổ mapping
-        canvas = ctk.CTkCanvas(mapping_window)
-        scrollbar = ctk.CTkScrollbar(mapping_window, orient="vertical", command=canvas.yview)
-        scrollable_frame = ctk.CTkFrame(canvas)
-
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(
-                scrollregion=canvas.bbox("all")
-            )
-        )
-
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        # Tạo tiêu đề cho mapping
-        lbl_excel = ctk.CTkLabel(scrollable_frame, text="Cột Excel", font=('Arial', 12, 'bold'))
-        lbl_excel.grid(row=0, column=0, padx=10, pady=10, sticky='w')
-
-        lbl_sql = ctk.CTkLabel(scrollable_frame, text="Cột SQL Server", font=('Arial', 12, 'bold'))
-        lbl_sql.grid(row=0, column=1, padx=10, pady=10, sticky='w')
-
-        lbl_sql_type = ctk.CTkLabel(scrollable_frame, text="Kiểu Dữ Liệu SQL Server", font=('Arial', 12, 'bold'))
-        lbl_sql_type.grid(row=0, column=2, padx=10, pady=10, sticky='w')
-
-        lbl_default = ctk.CTkLabel(scrollable_frame, text="Giá trị mặc định (nếu NULL)", font=('Arial', 12, 'bold'))
-        lbl_default.grid(row=0, column=3, padx=10, pady=10, sticky='w')
-
-        # Tạo các dòng để map cột
-        self.mapping_widgets = {}  # Lưu trữ Combobox, Entry và Label cho từng cột Excel
-
-        for idx, excel_col in enumerate(self.excel_columns, start=1):
-            current_row = idx * 2 - 1  # Hàng lẻ cho widgets
-
-            # Label cho cột Excel
-            lbl = ctk.CTkLabel(scrollable_frame, text=excel_col)
-            lbl.grid(row=current_row, column=0, padx=10, pady=5, sticky='w')
-
-            # Combobox cho cột SQL Server với tùy chọn "Not mapped"
-            cmb = ctk.CTkComboBox(scrollable_frame, values=self.sql_columns + ["Not mapped"], state="readonly", width=30)
-            cmb.grid(row=current_row, column=1, padx=10, pady=5, sticky='w')
-
-            # Nếu mapping đã tồn tại cho bảng này, tự động chọn
-            existing_mapping = self.mapping.get(self.selected_table, {}).get('mapping', {})
-            existing_default = self.mapping.get(self.selected_table, {}).get('default_values', {})
-            if self.mapping and self.selected_table in self.mapping and excel_col in existing_mapping:
-                cmb.set(existing_mapping[excel_col])
-            else:
-                cmb.set("Not mapped")  # Đặt giá trị mặc định là "Not mapped"
-
-            # Label để hiển thị kiểu dữ liệu SQL Server
-            lbl_type = ctk.CTkLabel(scrollable_frame, text="", width=25, anchor='w')
-            lbl_type.grid(row=current_row, column=2, padx=10, pady=5, sticky='w')
-
-            # Entry để nhập giá trị mặc định
-            ent = ctk.CTkEntry(scrollable_frame, width=30)
-            ent.grid(row=current_row, column=3, padx=10, pady=5, sticky='w')
-
-            # Nếu default value đã tồn tại, tự động điền
-            if self.mapping and self.selected_table in self.mapping and self.mapping[self.selected_table]['mapping'].get(excel_col) in self.mapping[self.selected_table]['default_values']:
-                ent.insert(0, str(self.mapping[self.selected_table]['default_values'][self.mapping[self.selected_table]['mapping'][excel_col]]))
-
-            # Lưu các widgets vào mapping_widgets
-            self.mapping_widgets[excel_col] = {'combobox': cmb, 'entry': ent, 'label_type': lbl_type}
-
-            # Cập nhật kiểu dữ liệu nếu đã chọn
-            if self.mapping and self.selected_table in self.mapping and excel_col in self.mapping[self.selected_table]['mapping']:
-                selected_sql_col = self.mapping[self.selected_table]['mapping'][excel_col]
-                sql_info = self.sql_columns_info.get(selected_sql_col, {})
-                sql_type = sql_info.get('DATA_TYPE', "")
-                lbl_type.config(text=sql_type)
-
-            # Liên kết sự kiện thay đổi lựa chọn Combobox với hàm cập nhật kiểu dữ liệu
-            cmb.bind("<<ComboboxSelected>>", lambda event, col=excel_col: self.update_sql_type(col))
-
-            # Thêm đường kẻ ngang giữa các dòng
-            if idx != len(self.excel_columns):
-                separator = ctk.CTkSeparator(scrollable_frame, orient='horizontal')
-                separator.grid(row=current_row + 1, column=0, columnspan=4, sticky='ew', padx=10, pady=5)
-
-        # **NEW: Add Primary Key Selection**
-        # Tạo nhãn cho chọn primary key
-        lbl_primary = ctk.CTkLabel(scrollable_frame, text="Chọn Cột So Sánh:", font=('Arial', 12, 'bold'))
-        lbl_primary.grid(row=len(self.excel_columns) * 2, column=0, padx=10, pady=10, sticky='w')
-
-        # Tạo Combobox để chọn primary key từ các cột SQL Server đã được map
-        self.primary_key_var = ctk.StringVar()
-        self.combobox_primary_key = ctk.CTkComboBox(scrollable_frame, values=self.sql_columns, state="readonly", width=30, textvariable=self.primary_key_var)
-        self.combobox_primary_key.grid(row=len(self.excel_columns) * 2, column=1, padx=10, pady=10, sticky='w')
-
-        # Nếu đã có primary key trong mapping, tự động chọn
-        existing_primary_key = self.mapping.get(self.selected_table, {}).get('primary_key', "")
-        if existing_primary_key:
-            self.combobox_primary_key.set(existing_primary_key)
-
-        # **END NEW**
-
-        # Button lưu mapping và đóng cửa sổ
-        btn_save = ctk.CTkButton(scrollable_frame, text="Lưu Mapping", command=lambda: self.save_mapping(mapping_window), width=20)
-        btn_save.grid(row=len(self.excel_columns) * 2 + 1, column=0, columnspan=4, pady=20)
-
-    def update_sql_type(self, excel_col):
-        """
-        Cập nhật kiểu dữ liệu SQL Server cho cột Excel tương ứng.
-        """
-        selected_sql_col = self.mapping_widgets[excel_col]['combobox'].get()
-        if selected_sql_col != "Not mapped":
-            sql_info = self.sql_columns_info.get(selected_sql_col, {})
-            sql_type = sql_info.get('DATA_TYPE', "")
-        else:
-            sql_type = ""
-        self.mapping_widgets[excel_col]['label_type'].config(text=sql_type)
+        mapping_window = Mapping_Table_Window(parent= self, excel_column= self.excel_columns,
+                                               table_name= self.selected_table, table_column=self.sql_columns, type_of_column= self.sql_columns_info)
 
     def save_mapping(self, mapping_window):
         if not self.selected_table:
@@ -912,39 +869,312 @@ class ExcelToSQLApp(ctk.CTkFrame):
             logger.error(f"Lỗi khi lưu mapping: {e}")
             messagebox.showerror("Lỗi", f"Lỗi khi lưu mapping: {e}")
 
-def main(): 
-    root = ctk.CTk()
-    root.withdraw() # Ẩn cửa sổ chính trước khi đăng nhập
+class Mapping_Table_Window(ctk.CTkToplevel):
+    def __init__(self, parent, excel_column, table_name, table_column, type_of_column):
 
-    def on_login_success(engine):
-        root.deiconify()  # Hiển thị cửa sổ chính sau khi đăng nhập thành công
-        app = ExcelToSQLApp(root, engine)
+        super().__init__(parent)
+        self.title(f"Map Cột Excel với SQL Server - Bảng '{table_name}'")
+        self.geometry("1000x700") 
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
 
-    def on_login_close():
-        root.destroy()  # Đóng toàn bộ ứng dụng khi cửa sổ đăng nhập bị đóng
+        self.mapping = {}
+        self.load_mapping()
+        self.table_name = table_name
+        self.table_column_list = table_column
+        self.type_of_column = type_of_column
+        self.excel_column = excel_column
 
-    # Kiểm tra xem đã có cấu hình kết nối chưa
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                config_data = json.load(f)
-            connections = config_data.get('connections', [])
 
-            if not connections:
-                raise ValueError("Không tìm thấy bất kỳ cấu hình kết nối nào.")
+        # Bind sự kiện đóng cửa sổ
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-            # Nếu có cấu hình, mở cửa sổ đăng nhập để chọn hoặc thêm mới
-            login_app = LoginWindow(root, on_login_success, on_login_close)
-            root.mainloop()
-        except Exception as e:
-            logger.error(f"Lỗi khi tải cấu hình kết nối: {e}")
-            messagebox.showerror("Lỗi", f"Lỗi khi tải cấu hình kết nối: {e}")
-            # Mở cửa sổ đăng nhập mới
-            login_app = LoginWindow(root, on_login_success, on_login_close)
-            root.mainloop()
-    else:
-        # Nếu không có cấu hình, mở cửa sổ đăng nhập
-        login_app = LoginWindow(root, on_login_success, on_login_close)
-        root.mainloop()
-if __name__ == "__main__": 
-    main()
+        self.create_map_frame()
+
+    def create_map_frame(self):
+        # Tạo một scrollbar cho cửa sổ mapping
+        scrollbar = ctk.CTkScrollbar(self, orientation="vertical")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        
+        scrollable_frame = ctk.CTkFrame(self)
+        scrollable_frame.grid(row=0, column=0, sticky="nsew")
+
+        # scrollable_frame.grid_rowconfigure((0,1,2,3), weight=1)
+        scrollable_frame.grid_columnconfigure((0,1,2,3), weight=1)
+
+        # Tạo tiêu đề cho mapping
+        lbl_excel = ctk.CTkLabel(scrollable_frame, text="Cột Bảng Excel", font=('Arial', 12, 'bold'), anchor="center")
+        lbl_excel.grid(row=0, column=0, padx=10, pady=10)
+
+        lbl_sql = ctk.CTkLabel(scrollable_frame, text="Cột Bảng Dữ Liệu", font=('Arial', 12, 'bold'), anchor="center")
+        lbl_sql.grid(row=0, column=1, padx=10, pady=10)
+
+        lbl_sql_type = ctk.CTkLabel(scrollable_frame, text="Kiểu Dữ Liệu SQL Server", font=('Arial', 12, 'bold'), anchor="center")
+        lbl_sql_type.grid(row=0, column=2, padx=10, pady=10)
+
+        lbl_default = ctk.CTkLabel(scrollable_frame, text="Giá trị mặc định (nếu NULL)", font=('Arial', 12, 'bold'), anchor="center")
+        lbl_default.grid(row=0, column=3, padx=10, pady=10)
+
+        # Tạo các dòng để map cột
+        self.mapping_widgets = {}  # Lưu trữ Combobox, Entry và Label cho từng cột Excel
+
+        for idx, excel_col in enumerate(self.excel_column, start=1):
+            current_row = idx * 2 - 1  # Hàng lẻ cho widgets
+
+            # Label cho cột Excel
+            lbl = ctk.CTkLabel(scrollable_frame, text=excel_col)
+            lbl.grid(row=current_row, column=0, padx=10, pady=5)
+
+            # Combobox cho cột SQL Server với tùy chọn "Not mapped"
+            # Mặc định khi gọi hàm thì giá trị truyền vào là giá trị mà ta vừa chọn ở combobox
+            # Để truyền giá trị khác giá trị mặc định thì thêm tham số event
+            cmb = ctk.CTkComboBox(scrollable_frame, values=self.table_column_list + ["Not mapped"], state="readonly", command= lambda event, col=excel_col: self.update_sql_type(col))
+            cmb.grid(row=current_row, column=1, padx=10, pady=5)
+
+            # Nếu mapping đã tồn tại cho bảng này, tự động chọn
+            existing_mapping = self.mapping.get(self.table_name, {}).get('mapping', {})
+            existing_default = self.mapping.get(self.table_name, {}).get('default_values', {})
+            if self.mapping and self.table_name in self.mapping and excel_col in existing_mapping:
+                cmb.set(existing_mapping[excel_col])
+            else:
+                cmb.set("Not mapped")  # Đặt giá trị mặc định là "Not mapped"
+
+            # Label để hiển thị kiểu dữ liệu SQL Server
+            lbl_type = ctk.CTkLabel(scrollable_frame, text="", anchor='w')
+            lbl_type.grid(row=current_row, column=2, padx=10, pady=5)
+
+            # Entry để nhập giá trị mặc định
+            ent = ctk.CTkEntry(scrollable_frame)
+            ent.grid(row=current_row, column=3, padx=10, pady=5)
+
+            # Nếu default value đã tồn tại, tự động điền
+            if self.mapping and self.table_name in self.mapping and self.mapping[self.table_name]['mapping'].get(excel_col) in self.mapping[self.table_name]['default_values']:
+                ent.insert(0, str(self.mapping[self.table_name]['default_values'][self.mapping[self.table_name]['mapping'][excel_col]]))
+
+            # Lưu các widgets vào mapping_widgets
+            self.mapping_widgets[excel_col] = {'combobox': cmb, 'entry': ent, 'label_type': lbl_type}
+
+            # Cập nhật kiểu dữ liệu nếu đã chọn
+            if self.mapping and self.table_name in self.mapping and excel_col in self.mapping[self.table_name]['mapping']:
+                selected_sql_col = self.mapping[self.table_name]['mapping'][excel_col]
+                sql_info = self.type_of_column.get(selected_sql_col, {})
+                sql_type = sql_info.get('DATA_TYPE', "")
+                lbl_type.config(text=sql_type)
+
+            # Thêm đường kẻ ngang giữa các dòng
+            if idx != len(self.excel_column):
+                separator = ctk.CTkFrame(scrollable_frame, height=2, fg_color="#CCCCCC", corner_radius=0)
+                separator.grid(row=current_row + 1, column=0, columnspan=4, sticky='ew', padx=10, pady=5)
+
+        # **NEW: Add Primary Key Selection**
+        # Tạo nhãn cho chọn primary key
+        lbl_primary = ctk.CTkLabel(scrollable_frame, text="Chọn Cột So Sánh:", font=('Arial', 12, 'bold'))
+        lbl_primary.grid(row=len(self.excel_column) * 2, column=0, padx=10, pady=10, sticky='w')
+
+        # Tạo Combobox để chọn primary key từ các cột SQL Server đã được map
+        self.primary_key_var = ctk.StringVar()
+        self.combobox_primary_key = ctk.CTkComboBox(scrollable_frame, values=self.table_column_list, state="readonly", variable=self.primary_key_var)
+        self.combobox_primary_key.grid(row=len(self.excel_column) * 2, column=1, padx=10, pady=10, sticky='w')
+
+        # Nếu đã có primary key trong mapping, tự động chọn
+        existing_primary_key = self.mapping.get(self.table_name, {}).get('primary_key', "")
+        if existing_primary_key:
+            self.combobox_primary_key.set(existing_primary_key)
+
+        # **END NEW**
+
+        # Button lưu mapping và đóng cửa sổ
+        btn_save = ctk.CTkButton(scrollable_frame, text="Lưu Mapping", command=self.save_mapping, width=20)
+        btn_save.grid(row=len(self.excel_column) * 2 + 1, column=0, columnspan=4, pady=20, sticky = "s")
+
+    def on_closing(self):
+        self.destroy()
+
+    def load_mapping(self):
+        if os.path.exists(MAPPING_FILE):
+            try:
+                with open(MAPPING_FILE, 'r', encoding='utf-8') as f:
+                    self.mapping = json.load(f)
+                    logger.info("Đã tải mapping từ file.")
+            except Exception as e:
+                logger.error(f"Lỗi khi tải mapping: {e}")
+                messagebox.showerror("Lỗi", f"Lỗi khi tải mapping: {e}")
+    
+    def save_mapping(self):
+        """
+        Lưu các giá trị mapping vào file json
+        """
+        mapping = {}
+        default_values = {}
+        mapped_sql_columns = set()
+
+        for excel_col, widgets in self.mapping_widgets.items():
+            sql_col = widgets['combobox'].get()
+            default_val = widgets['entry'].get()
+            if sql_col and sql_col != "Not mapped":
+                mapping[excel_col] = sql_col
+                mapped_sql_columns.add(sql_col)
+                if default_val:
+                    # Kiểm tra và chuyển đổi giá trị mặc định dựa trên kiểu dữ liệu của cột SQL Server
+                    data_type = self.type_of_column.get(sql_col, {}).get('DATA_TYPE', "").lower()
+                    try:
+                        if data_type in ['int', 'bigint', 'smallint', 'tinyint']:
+                            converted_val = int(default_val)
+                        elif data_type in ['float', 'real', 'decimal', 'numeric']:
+                            converted_val = float(default_val)
+                        else:
+                            converted_val = default_val  # Dữ liệu kiểu chuỗi
+                        default_values[sql_col] = converted_val
+                    except ValueError:
+                        messagebox.showerror("Lỗi", f"Giá trị mặc định cho cột '{sql_col}' không hợp lệ với kiểu dữ liệu '{data_type}'.")
+                        return
+
+        if not mapping:
+            messagebox.showwarning("Cảnh báo", "Bạn chưa map bất kỳ cột nào.")
+            return
+
+        # **NEW: Validate Primary Key Selection**
+        primary_key = self.primary_key_var.get()
+        if not primary_key:
+            messagebox.showwarning("Cảnh báo", "Bạn cần phải chọn một cột làm mốc so sánh (Primary Key).")
+            return
+
+        if primary_key not in mapped_sql_columns:
+            messagebox.showerror("Lỗi", "Cột được chọn làm Primary Key phải là một trong các cột đã được map.")
+            return
+        # **END NEW**
+
+        # Lưu mapping và default_values vào cấu trúc dữ liệu với table name
+        if self.table_name not in self.mapping:
+            self.mapping[self.table_name] = {}
+
+        self.mapping[self.table_name]['mapping'] = mapping
+        self.mapping[self.table_name]['default_values'] = default_values
+
+        # **NEW: Save Primary Key**
+        self.mapping[self.table_name]['primary_key'] = primary_key
+        # **END NEW**
+
+        # Xác định các cột SQL Server không được map
+        unmapped_sql_columns = set(self.table_column_list) - mapped_sql_columns
+
+        if unmapped_sql_columns:
+            # Mở cửa sổ mới để nhập giá trị mặc định cho các cột SQL Server không được map
+            self.input_default_values(unmapped_sql_columns, self)
+        else:
+            # Save mapping to JSON file
+            try:
+                with open(MAPPING_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(self.mapping, f, ensure_ascii=False, indent=4)
+                logger.info("Đã lưu mapping vào file.")
+            except Exception as e:
+                logger.error(f"Lỗi khi lưu mapping: {e}")
+                messagebox.showerror("Lỗi", f"Lỗi khi lưu mapping: {e}")
+                return
+
+            messagebox.showinfo("Thành công", "Đã lưu mapping thành công.")
+    def input_default_values(self, unmapped_sql_columns, mapping_window):
+        default_window = ctk.CTkToplevel(mapping_window)
+        default_window.title("Giá trị mặc định cho các cột SQL Server không được map")
+        default_window.geometry("500x400")
+
+        # Bind sự kiện đóng cửa sổ default_window
+        default_window.protocol("WM_DELETE_WINDOW", lambda: default_window.destroy())
+
+        # Tạo một canvas và một scrollbar cho cửa sổ default
+        canvas = ctk.CTkCanvas(default_window)
+        scrollbar = ctk.CTkScrollbar(default_window, orientation="vertical", command=canvas.yview)
+        scrollable_frame = ctk.CTkFrame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(
+                scrollregion=canvas.bbox("all")
+            )
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor='nw')
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Lưu các Entry để lấy giá trị mặc định
+        self.default_entries = {}
+
+        for idx, sql_col in enumerate(unmapped_sql_columns, start=1):
+            lbl = ctk.CTkLabel(scrollable_frame, text=sql_col, font=('Arial', 10, 'bold'))
+            lbl.grid(row=idx, column=0, padx=10, pady=5, sticky='w')
+
+            ent = ctk.CTkEntry(scrollable_frame, width=30)
+            ent.grid(row=idx, column=1, padx=10, pady=5, sticky='w')
+
+            self.default_entries[sql_col] = ent
+
+            
+    def update_sql_type(self, excel_col):
+        """
+        Cập nhật kiểu dữ liệu SQL Server cho cột Excel tương ứng.
+        """
+        selected_sql_col = self.mapping_widgets[excel_col]['combobox'].get()
+        if selected_sql_col != "Not mapped":
+            sql_info = self.type_of_column.get(selected_sql_col, {})
+            sql_type = f"{sql_info.get('DATA_TYPE')} - Cho phép null: {sql_info.get('IS_NULLABLE')}"
+        else:
+            sql_type = ""
+        self.mapping_widgets[excel_col]['label_type'].configure(text=sql_type)
+
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Lựa chọn món ăn cho ngày mai")
+        self.geometry("1200x800")
+        self.withdraw() # Ẩn cửa sổ chính trước khi đăng nhập
+
+        # Bind sự kiện đóng cửa sổ
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+        # Mở window đăng nhập
+        self.open_window_login()
+
+
+        self.mainloop()
+
+    def on_closing(self):
+        self.ExcelToSQLApp.on_closing()
+        self.destroy()
+    
+    def open_window_login(self):
+        # Kiểm tra xem đã có cấu hình kết nối chưa
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config_data = json.load(f)
+                connections = config_data.get('connections', [])
+
+                if not connections:
+                    raise ValueError("Không tìm thấy bất kỳ cấu hình kết nối nào.")
+
+                # Nếu có cấu hình, mở cửa sổ đăng nhập để chọn hoặc thêm mới
+                login_app = LoginWindow(self, self.login_success, self.close_login_window)
+                
+            except Exception as e:
+                logger.error(f"Lỗi khi tải cấu hình kết nối: {e}")
+                messagebox.showerror("Lỗi", f"Lỗi khi tải cấu hình kết nối: {e}")
+                # Mở cửa sổ đăng nhập mới
+                login_app = LoginWindow(self, self.login_success, self.close_login_window)
+        else:
+            # Nếu không có cấu hình, mở cửa sổ đăng nhập
+            login_app = LoginWindow(self, self.login_success, self.close_login_window)
+
+    def login_success(self, engine):
+        self.deiconify()
+        self.ExcelToSQLApp = ExcelToSQLWindow(parent= self, engine= engine)
+        self.ExcelToSQLApp.pack(fill="both", expand=True)
+
+    def close_login_window(self):
+        self.destroy()
+
+# Ví dụ chạy thử:
+if __name__ == "__main__":
+    app = App()
