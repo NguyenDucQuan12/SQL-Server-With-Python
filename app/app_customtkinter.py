@@ -1,3 +1,12 @@
+# ==============================================================================
+# Author: Nguyễn Đức Quân
+# Date: 2025-02-06
+# Description: Chức năng ghi dữ liệu từ file Excel vào cơ sở dữ liệu SQL Server.
+# Version: 0.0.1
+# Note: Khi sử dụng phần mềm hay các đoạn code, vui lòng tôn trọng bản quyền bằng cách để mục chữ ký tác giả, và nêu tên tác giả khi sử dụng các đoạn code
+# Không tôn trọng bản quyền nghiệp quật chết
+# =================================================================================
+
 import customtkinter as ctk  # pip install customtkinter
 from PIL import Image  # pip install pillow
 import pandas as pd  # pip install pandas
