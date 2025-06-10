@@ -231,3 +231,167 @@ ALTER TABLE TestTable
 ADD ID INT IDENTITY(1,1) NOT NULL
 ```
 Sau đó chạy file code ví dụ để kiểm tra.  
+
+### 4. Tìm kiếm với từ khóa
+
+Để sử dụng phương pháp tìm kiếm hỗ trợ không dấu, có từ ngữ liên quan đến từ tìm kiếm thì có thể sử dụng phương pháp `Full-Text Search (Tìm kiếm toàn văn bản)`. Phương pháp này tối ưu hóa cho việc tìm kiếm văn bản phức tạp, cung cấp kết quả nhanh chóng. Và đặc biệt phương pháp này tối ưu hóa cho việc tùm kiếm văn bản không phân biệt dấu.  
+
+`Full-Text Search` cho phép tìm kiếm văn bản phức tạp như tìm kiếm `từ đồng nghĩa`, tìm kiếm theo `cụm từ (phrase search)`, tìm kiếm các `từ gần nhau` trong văn bản, hoặc sử dụng các bộ lọc chuyên sâu (điều này không thể thực hiện bằng `LIKE` hoặc `COLLATE`).  
+
+`Full-Text Search` yêu cầu cài đặt chỉ mục trước và có thể tốn tài nguyên khi tạo chỉ mục ban đầu, nhưng sau khi chỉ mục được xây dựng, việc tìm kiếm sẽ rất nhanh chóng và hiệu quả.  
+
+Bây giờ sẽ tiến hành thửu nghiệm với bảng `Employee` gồm các cột như sau:  
+
+```
+Employee_Code
+Employee_Name
+Department
+Section
+Position
+Rank
+Start_Rank
+Privilege
+Email
+Status_Work
+Status
+```
+
+#### 4.1 Cài dặt Full-Text Search
+Để có thể sử dụng `Full-Text Search` ta cần kiểm tra xem tính năng này đã được cài đặt hay chưa (Mặc định nó được cài đặt treen các phiên bản SQL Server `Enterprise` và `Standar`).  
+
+```SQL Server
+SELECT FULLTEXTSERVICEPROPERTY('IsFullTextInstalled');
+```
+
+> Nếu trả về 1 thì Full-Text Search đã được cài đặt  
+> Nếu trả về 0 thì cần cài đặt Full-Text Search  
+
+Nếu bạn sử dụng phiên bản SQL Server không có sẵn tính năng `Full-Text Search`, bạn cần cài đặt nó từ `SQL Server Installation Center`.  
+
+#### 4.2 Tạo Full-Text Catalog và Full-Text Index
+
+Để bắt đầu sử dụng `Full-Text Search`, bạn cần tạo một `Full-Text Catalog` và `Full-Text Index` trên bảng mà bạn muốn tìm kiếm.  
+
+`Full-Text Catalog` là nơi lưu trữ các chỉ mục `Full-Text`. Bạn có thể tạo một `Full-Text Catalog` như sau:  
+
+```SQL Server
+CREATE FULLTEXT CATALOG EmployeeFTCatalog AS DEFAULT;
+```
+Trong đó:
+- `EmployeeFTCatalog` là tên của `Full-Text Catalog`. Bạn có thể đặt tên khác tùy ý.  
+
+Sau khi tạo `Full-Text Catalog`, ta sẽ tạo `Full-Text Index` trên cột mà bạn muốn tìm kiếm, ví dụ như cột `Employee_Name`.  
+
+```SQL Server
+CREATE FULLTEXT INDEX ON Employee(Employee_Name) 
+KEY INDEX PK_Employee;
+``` 
+Trong đó:  
+- `Employee_Name`: Là cột chứa dữ liệu mà bạn muốn tìm kiếm (tên nhân viên).  
+- `PK_Employee`: Là chỉ mục khóa chính (primary key) của bảng `Employee`. SQL Server yêu cầu bạn chỉ định một chỉ mục khóa chính để tạo `Full-Text Index`.  
+
+Chú ý: `Full-Text Index` chỉ có thể được tạo trên các cột có kiểu dữ liệu văn bản (như VARCHAR, TEXT, NVARCHAR, v.v.).  
+
+#### 4.3 Cập nhật chỉ mục Full-Text
+
+SQL Server `tự động duy trì chỉ mục Full-Text` khi có thay đổi trong dữ liệu (thêm, sửa, xóa). Tuy nhiên, để đảm bảo chỉ mục `Full-Text` luôn được tối ưu, bạn có thể thực hiện các bước sau để duy trì và cập nhật chỉ mục:  
+
+Khi có sự thay đổi lớn trong bảng, hoặc khi chỉ mục `Full-Text` bị phân mảnh, bạn có thể `rebuild` chỉ mục `Full-Text`. Điều này giúp làm mới chỉ mục và cải thiện hiệu suất tìm kiếm.  
+
+```SQL Server
+ALTER FULLTEXT INDEX ON Employee REBUILD;
+```
+Câu lệnh này sẽ tái xây dựng chỉ mục Full-Text, giúp tối ưu hóa quá trình tìm kiếm.  
+
+Nếu chỉ mục bị phân mảnh nhẹ, bạn có thể reorganize chỉ mục thay vì rebuild toàn bộ chỉ mục. Điều này giúp cải thiện hiệu suất mà không tốn quá nhiều tài nguyên.  
+
+```SQL Server
+ALTER FULLTEXT INDEX ON Employee REORGANIZE;
+```
+Câu lệnh này giúp giảm thiểu sự phân mảnh chỉ mục mà không làm gián đoạn quá trình tìm kiếm.  
+
+Để kiểm tra trạng thái chỉ mục và mức độ phân mảnh của nó, bạn có thể truy vấn các bảng hệ thống của SQL Server như sau:  
+
+```SQL Server
+SELECT * FROM sys.dm_fts_index_population WHERE table_name = 'Employee';
+``` 
+#### 4.4 Thực hiện truy vấn Full-Text Search
+
+Sau khi đã tạo chỉ mục `Full-Text` và tối ưu hóa, bạn có thể sử dụng các câu lệnh `CONTAINS` hoặc `FREETEXT` để thực hiện tìm kiếm Full-Text.  
+
+Sử dụng `CONTAINS` để tìm kiếm từ hoặc cụm từ chính xác:  
+
+```SQL Server
+SELECT 
+    Employee_Code, 
+    Employee_Name, 
+    Section, 
+    Position
+FROM 
+    Employee
+WHERE 
+    CONTAINS(Employee_Name, 'thuy');
+```
+
+> Câu lệnh này sẽ tìm tất cả các nhân viên có tên chứa từ thuy, bao gồm các từ có dấu và không có dấu.  
+
+Sử dụng `FREETEXT` để tìm kiếm từ có nghĩa tương tự:  
+
+```SQL Server
+SELECT 
+    Employee_Code, 
+    Employee_Name, 
+    Section, 
+    Position
+FROM 
+    Employee
+WHERE 
+    FREETEXT(Employee_Name, 'thuy');
+```
+
+> Câu lệnh này sẽ tìm kiếm những tên có nghĩa gần giống với từ khóa thuy.  
+
+#### 4.5 Cập nhật chỉ mục khi có sự thay đổi trong dữ liệu
+
+Khi có thay đổi trong bảng (thêm, sửa, xóa), SQL Server sẽ tự động cập nhật chỉ mục Full-Text. Tuy nhiên, bạn vẫn có thể thực hiện các bước sau để tối ưu hóa chỉ mục:  
+
+Các thao tác cụ thể:  
+- `Thêm nhân viên mới`: Khi thêm mới nhân viên vào bảng, chỉ mục Full-Text sẽ tự động cập nhật để bao gồm các từ khóa mới.  
+- `Cập nhật thông tin nhân viên`: Nếu bạn cập nhật tên của nhân viên (hoặc bất kỳ dữ liệu nào trong cột Employee_Name), chỉ mục Full-Text cũng sẽ tự động cập nhật.  
+- `Xóa nhân viên`: Khi xóa một nhân viên, chỉ mục Full-Text sẽ loại bỏ dữ liệu liên quan đến nhân viên đó.  
+
+- Cập nhật chỉ mục sau khi thêm hoặc cập nhật dữ liệu:  
+Mặc dù SQL Server tự động cập nhật chỉ mục `Full-Text`, bạn có thể gọi lại `REBUILD` hoặc `REORGANIZE` sau mỗi lần cập nhật lớn dữ liệu.  
+
+Việc tái xây dựng chỉ mục `Full-Text (rebuild)` là một cách hiệu quả để làm mới chỉ mục và giúp hệ thống hoạt động tốt hơn. Điều này nên thực hiện định kỳ, đặc biệt là khi có nhiều thay đổi trong bảng. Bạn có thể thực hiện `rebuild` chỉ mục như sau:  
+
+```SQL Server
+-- Sau khi thêm hoặc cập nhật dữ liệu lớn, thực hiện tái xây dựng chỉ mục
+ALTER FULLTEXT INDEX ON Employee REBUILD;
+```
+Tuy nhiên, việc tái xây dựng chỉ mục có thể tốn một chút thời gian và tài nguyên hệ thống, nên bạn nên lên lịch cho tác vụ này vào thời gian thấp điểm hoặc sau khi có nhiều thay đổi lớn.  
+
+- Quản lý tần suất cập nhật  
+
+Nếu bảng `Employee` thay đổi thường xuyên (nhiều bản ghi mới, sửa đổi, xóa), bạn có thể lên lịch các tác vụ bảo trì cho chỉ mục `Full-Text`, ví dụ như `mỗi đêm hoặc cuối tuần`.  
+Bạn có thể lên lịch tái xây dựng chỉ mục `Full-Text` bằng cách sử dụng `SQL Server Agent` hoặc các công cụ lập lịch công việc `(`như Task Scheduler của Windows)`.  
+
+#### 4.6 Quản lý Full-Text Search
+
+Bạn có thể kiểm tra trạng thái của các chỉ mục Full-Text đã tạo trên cơ sở dữ liệu bằng cách truy vấn các bảng hệ thống của SQL Server:  
+
+```SQL Server
+SELECT * 
+FROM sys.fulltext_indexes 
+WHERE object_id = OBJECT_ID('Employee');
+```
+
+Nếu bạn muốn xóa Full-Text Index và Full-Text Catalog, bạn có thể sử dụng câu lệnh sau:  
+
+```SQL Server
+-- Xóa chỉ mục Full-Text
+DROP FULLTEXT INDEX ON Employee;
+
+-- Xóa Catalog nếu không sử dụng nữa
+DROP FULLTEXT CATALOG EmployeeFTCatalog;
+```
