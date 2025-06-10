@@ -257,7 +257,7 @@ Status
 ```
 
 #### 4.1 Cài dặt Full-Text Search
-Để có thể sử dụng `Full-Text Search` ta cần kiểm tra xem tính năng này đã được cài đặt hay chưa (Mặc định nó được cài đặt treen các phiên bản SQL Server `Enterprise` và `Standar`).  
+Để có thể sử dụng `Full-Text Search` ta cần kiểm tra xem tính năng này đã được cài đặt hay chưa (Mặc định nó được cài đặt trên các phiên bản SQL Server `Enterprise` và `Standar`).  
 
 ```SQL Server
 SELECT FULLTEXTSERVICEPROPERTY('IsFullTextInstalled');
@@ -336,7 +336,7 @@ Rồi chọn mục `Full-Text Search` như hình dưới rồi nhấn download.
 
 ![alt text](Image/download_full_text_search.png)  
 
-Sau khi cài thành công thì nó hiển thị nhưu bên dưới và ấn close.  
+Sau khi cài thành công thì nó hiển thị như bên dưới và ấn close.  
 
 ![alt text](Image/successfuly_full_text_search.png)  
 
@@ -352,11 +352,11 @@ Sau đó nó sẽ khởi động lại từ bước 1 và thao tác tương tự
 
 ![alt text](Image/chosse_full_text_search.png)  
 
-Ấn next để nó downlaod về.  
+Ấn `Next` để nó downlaod về.  
 
 ![alt text](Image/successfuly_full_text_search.png)  
 
-Ấn close để hoàn thành. Và quay lại kiểm tra bằng lệnh `SELECT FULLTEXTSERVICEPROPERTY('IsFullTextInstalled');`  
+Ấn `close` để hoàn thành. Và quay lại kiểm tra bằng lệnh `SELECT FULLTEXTSERVICEPROPERTY('IsFullTextInstalled');`  
 
 #### 4.2 Tạo Full-Text Catalog và Full-Text Index
 
