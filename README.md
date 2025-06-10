@@ -240,7 +240,7 @@ Sau đó chạy file code ví dụ để kiểm tra.
 
 `Full-Text Search` yêu cầu cài đặt chỉ mục trước và có thể tốn tài nguyên khi tạo chỉ mục ban đầu, nhưng sau khi chỉ mục được xây dựng, việc tìm kiếm sẽ rất nhanh chóng và hiệu quả.  
 
-Bây giờ sẽ tiến hành thửu nghiệm với bảng `Employee` gồm các cột như sau:  
+Bây giờ sẽ tiến hành thử nghiệm với bảng `Employee` gồm các cột như sau:  
 
 ```
 Employee_Code
@@ -262,11 +262,101 @@ Status
 ```SQL Server
 SELECT FULLTEXTSERVICEPROPERTY('IsFullTextInstalled');
 ```
+![alt text](Image/check_full_text_search.png)  
 
 > Nếu trả về 1 thì Full-Text Search đã được cài đặt  
 > Nếu trả về 0 thì cần cài đặt Full-Text Search  
 
 Nếu bạn sử dụng phiên bản SQL Server không có sẵn tính năng `Full-Text Search`, bạn cần cài đặt nó từ `SQL Server Installation Center`.  
+
+`Cài đặt Full-Text Search từ SQL Server Installation Center`  
+
+Cách 1: Cài mới SQL Server  
+Để cài đặt `Full-Text Search`, bạn sẽ phải thực hiện lại quá trình cài đặt SQL Server và chọn cài đặt tính năng Full-Text Search.  
+- `Chạy SQL Server Installation Center`:  
+    - Mở `SQL Server Installation Center` từ menu Start hoặc từ đường dẫn cài đặt SQL Server.  
+    - Chọn `"New SQL Server stand-alone installation or add feature to an existing installation"`.  
+
+- Chọn tính năng cài đặt:  
+    - Trong `Feature Selection`, chọn `Full-Text and Semantic Extractions for Search`.  
+
+- Tiếp tục các bước cài đặt bình thường. SQL Server sẽ yêu cầu bạn cài đặt một số tính năng bổ sung nếu cần thiết.  
+
+- Hoàn tất cài đặt:  
+
+- Sau khi cài đặt xong, khởi động lại SQL Server (nếu cần thiết) để kích hoạt tính năng Full-Text Search.  
+
+Cách 2: Cài thêm tính năng nếu đã có SQL Server  
+Nếu bạn đã cài đặt SQL Server nhưng không chọn `Full-Text Search`, bạn có thể thêm tính năng này mà không cần cài đặt lại toàn bộ SQL Server. Dưới đây là các bước:  
+- Mở SQL Server Setup:  
+
+    - Chạy SQL Server Setup từ nơi bạn đã tải SQL Server với quyền admin `(run as administrator)`.  
+
+    - Chọn `"Add feature to an existing instance"`:  
+
+![alt text](Image/run_setup_sql_Server.png)  
+
+![alt text](Image/add_features_to_an_existing_installtion.png)  
+
+Ấn `next` cho đến mục `Installion Type`  
+
+![alt text](Image/installation_type_SQL_Server.png)  
+
+- Khi cửa sổ SQL Server Setup mở ra, chọn `"Add feature to an existing instance"`.  
+
+    - Chọn `instance SQL Server` mà bạn muốn cài đặt `Full-Text Search` cho nó.  
+
+![alt text](Image/add_features_to_an_existing_installtion_of_SQL_Server_2022.png)  
+
+Bỏ tick mục tài khoản azura và ấn next  
+
+![alt text](Image/azure_untick.png)  
+
+- Chọn `Full-Text Search`:  
+
+    - Trong phần `Instance Feature`, chọn `Full-Text and Semantic Extractions for Search`.  
+
+![alt text](Image/chosse_full_text_search.png)  
+
+- Tiếp tục cài đặt và hoàn tất quá trình.  
+
+Nếu bước chọn tính năng `Full-Text Search` mà không có `Full-Text and Semantic Extractions for Search` thì trong quá trình cài đặt bạn đã cài thiếu chức năng, cần tải thêm chức năng này. Mình đang dùng SQL Server 2022 nên lên trang chủ tải về file cài đặt tương ứng.  
+
+![alt text](Image/download_sqlserver_express.png)  
+
+Chạy tệp cài đặt   
+
+![alt text](Image/SQL_Server_2022_SSEL.png)  
+
+Sau đó chọn mục `Download Media`  
+
+![alt text](Image/download_media.png)  
+
+Rồi chọn mục `Full-Text Search` như hình dưới rồi nhấn download.  
+
+![alt text](Image/download_full_text_search.png)  
+
+Sau khi cài thành công thì nó hiển thị nhưu bên dưới và ấn close.  
+
+![alt text](Image/successfuly_full_text_search.png)  
+
+Sau khi cài thành công quay trở lại thư mục download sẽ có 1 tệp mới là `SQLEXPRADV_x64_ENU`  
+
+![alt text](Image/install_SQLEXPRADV.png)  
+
+Mở thư mục này lên để extract ra 1 thư mục của nó.  
+
+![alt text](Image/extract_SQLEXPRADV.png)  
+
+Sau đó nó sẽ khởi động lại từ bước 1 và thao tác tương tự.  
+
+![alt text](Image/chosse_full_text_search.png)  
+
+Ấn next để nó downlaod về.  
+
+![alt text](Image/successfuly_full_text_search.png)  
+
+Ấn close để hoàn thành. Và quay lại kiểm tra bằng lệnh `SELECT FULLTEXTSERVICEPROPERTY('IsFullTextInstalled');`  
 
 #### 4.2 Tạo Full-Text Catalog và Full-Text Index
 
