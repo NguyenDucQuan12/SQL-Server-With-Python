@@ -324,7 +324,7 @@ Nếu bước chọn tính năng `Full-Text Search` mà không có `Full-Text an
 
 ![alt text](Image/download_sqlserver_express.png)  
 
-Chạy tệp cài đặt   
+Chạy tệp cài đặt 2022 Express [tại đây](Setup/SQL2022-SSEI-Expr.rar)  
 
 ![alt text](Image/SQL_Server_2022_SSEL.png)  
 
