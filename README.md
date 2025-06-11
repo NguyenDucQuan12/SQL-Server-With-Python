@@ -370,7 +370,15 @@ CREATE FULLTEXT CATALOG EmployeeFTCatalog AS DEFAULT;
 Trong đó:
 - `EmployeeFTCatalog` là tên của `Full-Text Catalog`. Bạn có thể đặt tên khác tùy ý.  
 
-Sau khi tạo `Full-Text Catalog`, ta sẽ tạo `Full-Text Index` trên cột mà bạn muốn tìm kiếm, ví dụ như cột `Employee_Name`.  
+Sau khi tạo `Full-Text Catalog`, ta sẽ tạo `Full-Text Index` trên cột mà bạn muốn tìm kiếm, ví dụ như cột `Employee_Name`. Yêu cầu phải có khóa chính.  
+
+Nếu chưa có khóa chính ta có thể cài đặt khóa chính cho bảng `Employee` với cột khóa chính là `Employee_Code` như sau:  
+```SQL Server
+ALTER TABLE Employee
+ADD CONSTRAINT PK_Employee_Code PRIMARY KEY (Employee_Code);
+```
+
+Sau đó mới thực hiện câu lệnh tạo FullText Index bên dưới.  
 
 ```SQL Server
 CREATE FULLTEXT INDEX ON Employee(Employee_Name) 
@@ -379,6 +387,30 @@ KEY INDEX PK_Employee;
 Trong đó:  
 - `Employee_Name`: Là cột chứa dữ liệu mà bạn muốn tìm kiếm (tên nhân viên).  
 - `PK_Employee`: Là chỉ mục khóa chính (primary key) của bảng `Employee`. SQL Server yêu cầu bạn chỉ định một chỉ mục khóa chính để tạo `Full-Text Index`.  
+
+Nếu gặp lỗi:  
+> Msg 7653, Level 16, State 1, Line 17  
+> 'PK_Employee' is not a valid index to enforce a full-text search key. A full-text search key must be a unique, non-nullable, single-column index which is not offline, is not defined on a non-deterministic or imprecise nonpersisted computed column, does not have a filter, and has maximum size of 900 bytes. Choose another index for the full-text key.  
+
+Có nghĩa là bảng này chưa có khóa chính hoặc ko có cột nào là duy nhất (Cột khóa chính yêu cầu không được phép null).  
+
+Bạn cần tạo một chỉ mục duy nhất (Unique Index) trên cột khóa chính hoặc cột không phải là khóa chính mà bạn muốn tạo Full-Text Index. Ví dụ, bạn có thể tạo một chỉ mục UNIQUE trên cột `Employee_Code` nếu cột này là duy nhất.  
+
+Sử dụng cột `Employee_Code` làm khóa duy nhất để làm chỉ mục cho `Full-Text Index` như sau:  
+
+```SQL Server
+CREATE UNIQUE NONCLUSTERED INDEX IX_Employee_Code ON Employee(Employee_Code);
+```
+Sau đó chạy lại lệnh tạo `Full-Text Search` trên cột `Employee_Name` như sau:  
+
+```SQL Server
+CREATE FULLTEXT INDEX ON Employee(Employee_Name)
+KEY INDEX IX_Employee_Code;
+```
+
+Trong đó:  
+- `Employee_Name` là cột bạn muốn tạo `Full-Text Index` để tìm kiếm.  
+- `IX_Employee_Code` là chỉ mục duy nhất mà bạn vừa tạo để làm chỉ mục khóa cho `Full-Text Index`.  
 
 Chú ý: `Full-Text Index` chỉ có thể được tạo trên các cột có kiểu dữ liệu văn bản (như VARCHAR, TEXT, NVARCHAR, v.v.).  
 
