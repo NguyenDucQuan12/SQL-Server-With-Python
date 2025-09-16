@@ -517,3 +517,474 @@ DROP FULLTEXT INDEX ON Employee;
 -- Xóa Catalog nếu không sử dụng nữa
 DROP FULLTEXT CATALOG EmployeeFTCatalog;
 ```
+
+# III. Sao lưu dữ liệu
+
+Để tránh sai sót trong quá trình vận hành, hay hạn chế rủi ro khi thao tác với CSDL, ta cần sao lưu dữ liệu thường xuyên. Cần lưu ý các điểm sau:  
+
+> Mất dữ liệu tối đa cho phép (RPO): thường được khuyến cáo là 15 phút  
+> Thời gian khôi phục (RTO): Tùy vào quy mô của CSDL thì thường là 30-120 phút  
+> Chế độ sao lưu: full, day, transaction  
+> 3–2–1 + “immutability”: 3 bản sao lưu, 2 loại phương tiện và 1 bản offsite (đám mây, không cho hép sửa xóa)  
+> Hệ thống backup: Sử dụng backup gốc của SQL Server là lựa chọn tốt nhất, tránh sao lưu ở tầng ứng dụng (xuất csv, ...) làm phương án chính  
+> Tách biệt hạ tầng: Các nơi lưu trữ backup nên là các nơi khác nhau để tránh rủi ro **mất mát tập trung**  
+> Tự động hóa: Tự động hóa các quy trình, có cảnh báo/theo dõi, thử nghiệp khôi phục dữ liệu định kỳ để đảm bảo hệ thống hoạt động trơn tru  
+
+## 1. Thời gian sao lưu
+Với hệ thống vận hành 24/7 thì lịch sao lưu được khuyến cáo như sau:  
+Với sao lưu full: `Mỗi chủ nhật 00:00 (tần suất 1 lần/1 tuần)`  
+Với sao lưu differential: Sao lưu mỗi ngày `0:30 hằng ngày` và không trùng vào ngày sao lưu full vì nó chứa luôn cả ngày rồi  
+Với sao lưu transaction log: Sao lưu mỗi 15 phút, bắt đầu từ `0:45` sau khi sao lưu hằng ngày  
+
+## 2. Thiết lập SQL Server
+
+### 2.1 Bật backup compression và tạo chứng chỉ
+
+Khi backup sử dụng chế độ `Compression` là nén khi backup, giúp việc sao lưu tốt hơn, tuy nhiên sẽ tốn dung lượng CPU một chút.  
+Tuy nhiên ở các phiên bản `SQL Server Express` hay `Local` thì không thể sử dụng chức năng này được. Nếu máy bạn sử dụng 2 loại trên thì loại bỏ tham số `COMPRESSION` trong các câu truy vấn ở mục dưới.  
+Hoặc có một mẹo nhỏ là bật chế độ `Compression` làm mặc định như bên dưới đây, câu lệnh này chỉ khả dụng với các phiên bản SQL khác ngoài `Express và local`.  
+
+```sql
+EXEC sp_configure 'show advanced options', 1; RECONFIGURE;
+EXEC sp_configure 'backup compression default', 1; RECONFIGURE;
+```
+
+### 2.1 Thư mục lưu trữ
+Dùng UNC share (ví dụ: \\backup-svr\sql\...) hoặc Object Storage (S3/MinIO/Azure Blob) qua gateway/mount.  
+
+Không lưu chung đĩa với file dữ liệu/transaction log của DB.  
+
+## 3. Lệnh T-SQL
+
+Các lệnh dưới đây được chạy ở Script trong phần mềm `SSMS: SQL Server Managerman Studio`.  
+
+> [!IMPORTANT]  
+> Thay đổi You_DB, My_DB bằng các tên Database thật sự    
+
+### 3.1 Full backup
+`Full Backup` thường được sao lưu vào cuối tuần, nơi bắt đầu cho 1 tuần mới, có thể sao lưu lúc 0h00.  
+Việc tạo `full backup` là điều kiện tiên quyết cho các bản backup còn lại. Vì các bản backup còn lại sẽ so sánh sự khác nhau tại thời điểm `full backup` gần nhất.  
+Tạo 1 `full backup` như sau:  
+```sql
+BACKUP DATABASE [YourDB]
+TO DISK = N'E:\SQL_Backup\YourDB\Full\YourDB_FULL_20250916_000000.bak'
+WITH            
+    CHECKSUM,             -- kiểm tra toàn vẹn khi backup
+    COMPRESSION,          -- thường giảm kích thước đáng kể
+    STATS = 5;            -- báo tiến độ
+```
+Trong đó:  
+- **[YourDB]**:  Là tên CSDL muốn tạo bản backup full
+- **N'E:\SQL_Backup\YourDB\Full\YourDB_FULL_20250916_000000.bak'**: Là đường dẫn đến tệp backup full được lưu  
+- **CHECKSUM**: Tính và ghi checksum vào file backup; khi restore/verify, SQL Server sẽ so–khớp checksum để phát hiện lỗi đọc/ghi/corruption  
+- **COMPRESSIOM**: Nén file backup (thường giảm 30–70% dung lượng). Tuy nhiên tốn CPU khi backup và restore  
+- **STATS**: Hiển thị tiến độ mỗi 5% (Theo dõi tiến độ khi chạy job Agent)  
+
+> [!NOTE]  
+> #### Thư mục đích lưu trữ tệp backup
+
+Đường dẫn thư mục chứa các tệp đích phải là thư mục nằm trên máy `đang chạy SQL Server` hoặc 1 thư mục được chi sẻ qua network.  
+SQL Server phải có quyền thao tác với thư mục đó, nếu không khi backup thì vẫn tạo được các thư mục con, nhưng đến tệp `.bak` thì không có quyền tạo.  
+Khi backup mà gặp lỗi `Operating system error 5(Access is denied.)` có nghĩa là thư mục không có quyền tạo tệp backup, ta sửa như sau.  
+Chạy lệnh sau để lấy tên tài khoản SQL Server:  
+```sql
+SELECT servicename, service_account
+FROM sys.dm_server_services
+WHERE servicename LIKE 'SQL Server (%';
+```
+![alt text](Image/get_sql_server.png)  
+
+Sau đó vào thư mục muốn lưu trữ các tệp backup chọn `Properties --> Security`  
+
+![alt text](Image/setting_fordel.png)  
+
+Chọn `Edit` mục `Group or user names` sau đó chọn `Add` và điền tên `service_account` và sử dụng `Check Names` kiểm tra xem nó có ra tên người dùng không.  
+
+![alt text](Image/add_new_user_names_folder.png) 
+
+Sau đó nhấn `OK` và tiến hành chọn quyền hạn cho người dùng vừa thêm. Có thể chọn `Full Control` cho tài khoản vừa thêm.  
+
+![alt text](Image/add_fullcontrol_user_folder.png)  
+
+Như vậy là đã sửa được lỗi `Acess Denied`.  
+
+Với các CSDL lớn có thể ảnh hưởng đến hiệu suất, sử dùng striping (nhiều file .bak) cho DB rất lớn để tăng throughput; cân nhắc MAXTRANSFERSIZE, BUFFERCOUNT nếu cần tối ưu hiệu năng. Việc này giúp tăng thông lượng I/O và rút ngắn thời gian backup/restore. Tất cả các “stripe” đều bắt buộc phải có mặt khi restore.  
+
+```sql
+BACKUP DATABASE [YourDB]
+TO  DISK = N'E:\SQL_Backup\YourDB\Full\YourDB_FULL_20250916_000000_1.bak',
+    DISK = N'F:\SQL_Backup\YourDB\Full\YourDB_FULL_20250916_000000_2.bak',
+    DISK = N'G:\SQL_Backup\YourDB\Full\YourDB_FULL_20250916_000000_3.bak',
+    DISK = N'H:\SQL_Backup\YourDB\Full\YourDB_FULL_20250916_000000_4.bak'
+WITH NAME = N'YourDB Full 20250916_000000',
+    CHECKSUM, COMPRESSION, STATS = 5,
+    MAXTRANSFERSIZE = 4194304,    -- 4 MB
+    BUFFERCOUNT = 64;             -- điều chỉnh theo I/O thực tế
+```
+
+Ta có thể sử dụng `Dynamic SQL` để tự động tạo ngày giờ như sau:  
+```SQL
+DECLARE @stamp sysname =
+    CONVERT(varchar(8), GETDATE(), 112) + '_' +
+    REPLACE(CONVERT(varchar(8), GETDATE(), 108), ':', '');
+
+DECLARE @cmd nvarchar(max);
+
+SET @cmd = N'BACKUP DATABASE [Docker_DB]
+TO ' +
+N'DISK = N''E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_' + @stamp + '_1.bak'',' +
+N' DISK = N''E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_' + @stamp + '_2.bak'',' +
+N' DISK = N''E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_' + @stamp + '_3.bak'',' +
+N' DISK = N''E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_' + @stamp + '_4.bak'''
++ N'NAME = N''Docker_DB Full ' + @stamp + ''',
+    CHECKSUM, COMPRESSION, STATS = 5,
+    MAXTRANSFERSIZE = 4194304,
+    BUFFERCOUNT = 64;';
+
+PRINT @cmd;  -- kiểm tra chuỗi trước khi chạy
+EXEC sp_executesql @cmd;  -- Thực hiện lệnh
+```
+
+Trong đó:  
+- Số file tạo ra: 3–8 stripes là khoảng hay dùng (tuỳ số volume/đĩa và băng thông).  
+- MAXTRANSFERSIZE: 1–4–8MB là giá trị hay thử  
+- BUFFERCOUNT tăng dần đến khi không còn thêm lợi ích.  
+
+Khi cần tạo 1 bản `Full backup` mới để gửi cho người khác hoặc thao tác khác, ta có thể tạo 1 bản copy bằng lệnh `COPY_ONLY`:  
+```sql
+BACKUP DATABASE [YourDB]
+TO DISK = N'E:\SQL_Backup\YourDB\YourDB_FULL_20250916_000000.bak'
+WITH COPY_ONLY, CHECKSUM, COMPRESSION, STATS = 5;
+```
+Bản copy này là độc lập, ko ảnh hưởng đến việc sao lưu cho differentical hay log vì 2 bản backup ấy sẽ sử dụng những bản full mà ko có thuộc tính `COPY_ONLY`.  
+
+### 3.2 Differential
+Đối với `Differential` được sao lưu hằng ngày, nó chỉ sao lưu những dữ liệu mà có sự thay đổi so với bản `Full backup` gần nhất (không có thuộc tính `COPY_ONLY`).  
+Vì vậy ta luôn phải tạo 1 `Backup full` trước khi backup các kiểu còn lại  
+
+```sql
+BACKUP DATABASE [YourDB]
+TO DISK = N'E:\SQL_Backup\MyYourDBDB\YourDB_DIFF_20250916_060000.bak'
+WITH DIFFERENTIAL,
+    CHECKSUM, COMPRESSION, STATS = 5;
+```
+
+Ta cũng có thể strip cho các `Differencetial backup` như sau.  
+```sql
+BACKUP DATABASE [YourDB]
+TO  DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_060000_1.bak',
+    DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_060000_2.bak',
+    DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_060000_3.bak',
+    DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_060000_4.bak'
+WITH DIFFERENTIAL, NAME = N'YourDB Diff 20250916_060000',
+    CHECKSUM, COMPRESSION, STATS = 5,  -- Compression chỉ dùng được với SQL Server ko phải là express
+    MAXTRANSFERSIZE = 4194304, BUFFERCOUNT = 64;
+```
+
+### 3.2 Transaction Log
+`Log Backup` được thực hiện khi CSDL ở chế độ `FULL` hoặc `BULK_LOGGED` (mặc định CSDL sẽ ở chế độ `SIMPLE`), và cần ít nhất một bản `FULL Backup (không phụ thuộc vào Log Diferential)` tồn tại **Sau khi CSDL chuyển sang chế độ FULL hoặc BULK_LOGGED**.  
+Sau đó thì có thể thực hiện `Log backup` mà không cần chuyển sang `FULL hoặc FULL_LOGGED`.  
+Đối với `Transaction Log` được sao lưu 15 phút 1 lần.  
+
+Có thể kiểm tra chế độ hiện tại của CSDL bằng lệnh sau:  
+```sql
+SELECT name, recovery_model_desc
+FROM sys.databases
+WHERE name = N'You_DB_Name';
+```
+Nếu CSDL đang ở chế độ `SIMPLE` thì chuyển nó sang chế độ `FULL`.  
+```sql
+-- Chỉ làm 1 lần trước khi bắt đầu chuỗi log:
+ALTER DATABASE [YourDB] SET RECOVERY FULL;
+```
+
+Tiến hành tạo 1 bản `Full Backup` mới.  
+```sql
+BACKUP DATABASE [YourDB]
+TO  DISK = N'E:\SQL_Backup\YourDB\Full\YourDB_FULL_20250916_000000_1.bak',
+    DISK = N'F:\SQL_Backup\YourDB\Full\YourDB_FULL_20250916_000000_2.bak',
+    DISK = N'G:\SQL_Backup\YourDB\Full\YourDB_FULL_20250916_000000_3.bak',
+    DISK = N'H:\SQL_Backup\YourDB\Full\YourDB_FULL_20250916_000000_4.bak'
+WITH NAME = N'YourDB Full 20250916_000000',
+    CHECKSUM, COMPRESSION, STATS = 5,  -- Compression chỉ dùng được với SQL Server ko phải là express
+    MAXTRANSFERSIZE = 4194304,    -- 4 MB
+    BUFFERCOUNT = 64;             -- điều chỉnh theo I/O thực tế
+```
+
+Sau đó thực hiện `Log backup` mà ko cần chuyển hay gọi `Full backup` trước mỗi lần gọi cho các lần sau.  
+```sql
+BACKUP LOG [YourDB]
+TO DISK = N'\\backup-svr\sql\YourDB\log\YourDB_LOG_$(ESCAPE_SQUOTE(DATETIME)).trn'
+WITH COMPRESSION, CHECKSUM, STATS = 10,
+    ENCRYPTION (ALGORITHM = AES_256, SERVER CERTIFICATE = MyBackupCert);
+```
+
+Hoặc có thể sử dụng strip file cho `Log backup` nếu số lượng dữ liệu lớn để tăng tốc backup.  
+```sql
+BACKUP LOG [MyDB]
+TO  DISK = N'E:\SQL_Backup\YourDB\log\YourDB_LOG_'+@stamp+'_1.trn',
+    DISK = N'F:\SQL_Backup\YourDB\log\YourDB_LOG_'+@stamp+'_2.trn',
+    DISK = N'G:\SQL_Backup\YourDB\log\YourDB_LOG_'+@stamp+'_3.trn',
+    DISK = N'H:\SQL_Backup\YourDB\log\YourDB_LOG_'+@stamp+'_4.trn'
+WITH NAME = N'YourDB Log '+@stamp,
+    CHECKSUM, COMPRESSION, STATS = 5,
+    MAXTRANSFERSIZE = 4194304, BUFFERCOUNT = 64;
+```
+
+### 3.3 Xem danh sách lịch sử ghi log
+Có thể truy vấn các lần ghi log của 1 CSDL như sau:  
+```sql
+SELECT TOP (200)
+       database_name, backup_start_date, backup_finish_date,
+       type, -- D=Full, I=Diff, L=Log
+       first_lsn, last_lsn, checkpoint_lsn, database_backup_lsn
+FROM msdb.dbo.backupset
+WHERE database_name = 'MyDB'
+ORDER BY backup_finish_date DESC
+```
+
+Thay `database_name` đúng với tên DB cần kiểm tra. Các trạng thái log được quy định như sau, `D: Full backup`, `I: Differential backup` và `L: Log backup`.  
+
+## 4. Khôi phục dữ liệu
+
+Khi ta có các bản backup dữ liệu từ trước thì ta có thể khôi phục lại dữ liệu tại từng thời điểm tương ứng với các bản backup.  
+> Lưu ý nếu khi sao lưu dữ liệu sử dụng striping để tách nhỏ các file thì khi khôi phục phải có đầy đủ các file đã tách nhỏ ra.  
+
+### 4.1 Xác minh các file backup
+Trước khi khôi phục dữ liệu ta cần tiến hành xác minh các file backup, có 3 mức độ phổ biến như sau:  
+Đọc siêu dữ liệu của 1 tệp backup.  
+
+```sql
+RESTORE HEADERONLY
+FROM DISK = N'E:\SQL_Backup\Docker_DB\Log\Docker_DB_20250916_071500.trn';
+```
+Câu lệnh này trả về các thông tin của tệp backup tại đường dẫn trên có chứa: tên DB, phiên bản, thời gian tạo backup, thời gian hoàn thành tạo backup, ...  
+
+```sql
+RESTORE FILELISTONLY
+FROM DISK = N'E:\SQL_Backup\Docker_DB\Log\Docker_DB_20250916_071500.trn';
+```
+Câu lệnh này trả về mối quan hệ của tệp log này được tạo từ tệp full nào gần nhất.  
+
+```sql
+RESTORE VERIFYONLY
+FROM DISK = N'E:\SQL_Backup\Docker_DB\Log\Docker_DB_20250916_071500.trn'
+WITH CHECKSUM;
+```
+Câu lệnh này kiểm tra tính toàn vẹn ở mức backup (không tạo DB mới) dựa trên checksum được tạo ở tệp backup khi backup ban đầu.
+Lưu ý: VERIFYONLY không phát hiện mọi dạng lỗi logic trong dữ liệu. Kiểm tra triệt để nhất vẫn là test restore lên môi trường khác rồi chạy DBCC CHECKDB.  
+Lệnh này cũng được gọi sau mỗi lần backup, kiểm tra xem tệp backup có hỏng hay không.  
+
+### 4.2 Kịch bản thực hiện khôi phục dữ liệu
+Để khôi phục được CSDL thì ta cần có ít nhất 1 bản `Full backup` tại thời điểm mới nhất (gần thời gian ta muốn dữ liệu trở về như cũ)  
+Các bản `Differential backup` hoặc `Log backup` nếu có thì việc khôi phục dữ liệu càng chi tiết, càng đầy đủ hơn tại thời điểm ta muốn.  
+Đầu tiên ta cần khôi phục bản `Full backup`  
+Tiếp theo nếu có bản `Differential backup` thì ta khôi phục tiếp bản này  
+Cuối cùng là những bản `Log backup` nếu tồn tại thì thực hiện khôi phục từng bản `Log backup` cho đến thời điểm ta muốn.  
+Chi tiết như sau.  
+
+Ví dụ muốn khôi phục CSDL về thời điểm : `10:23:00 16/09/2025`.  
+Ta có 2 lựa chọn, 1 là khôi phục dữ liệu vào 1 Database mới, hoặc có thể khôi phục dữ liệu cũ về Database gốc.  
+Ta cần phải thực hiện theo thứ tự từng bước từ `Full --> Diff --> Log` cho đến khi đến thời điểm cần khôi phục hoặc gần với thời điểm đấy nhất.  
+
+Trước khi restore ta cần chuyển context sang master để thao tác.  
+```sql
+USE master;
+GO
+```
+
+#### 4.1 Khôi phục bản full gần nhất
+Bản `Full backup` mới nhất, gần nhất với thời điểm cần khôi phục là `00:00:00 14/09/2025` là ngày sao lưu vào chủ nhật của tuần trước đó.  
+
+`Khôi phục vào Database gốc`  
+Trước khi ghi đè dữ liệu vào database gốc, ta **nên backup thêm 1 tệp Log backup lần nữa** cho các giao dịch cuối cùng.  
+
+```sql
+BACKUP LOG [YourDB]
+TO DISK = N'E:\SQL_Backup\YourDB\tail\YourDB_TAIL_20250916_104500.trn'
+WITH NORECOVERY, CHECKSUM, STATS = 5;
+-- DB sẽ vào trạng thái RESTORING (không còn kết nối mới)
+```
+
+Nếu không thể thao tác đưa DB đang hoạt động vào trạng thái `RESTORE` thì ta thực hiện các bước sau:  
+- Cô lập kết nối tới DB.  
+```sql
+ALTER DATABASE [YourDB] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+```
+- Mở lại kết nối cho các user khác sau khi hoàn tất quá trình khôi phục DB (Sau bước WITH RECOVERY).  
+```sql
+ALTER DATABASE [YourDB] SET MULTI_USER;
+```
+Sau khi cô lập kết nối thì mới bắt đầu tiến hành khôi phục DB bằng việc khôi phục từ bản Full.  
+
+```sql
+RESTORE DATABASE [YourDB]
+FROM DISK = N'E:\SQL_Backup\YourDB\Full\YourDB_FULL_20250914_020000.bak' -- FULL Chủ nhật
+WITH NORECOVERY, REPLACE, CHECKSUM, STATS = 5;
+```
+
+`Khôi phục vào 1 database mới`  
+Việc khôi phục vào 1 DB mới không cần chuyển DB sang trạng thái `RESTORE` hay `Cô lập kết nối DB`  
+Tuy nhiên trong các bản backup luôn có 2 thông tin chứa đường dẫn tệp `Log` và `Data` của mỗi Database. Khi ta chuyển sang 1 Database mới thì cần chỉ định chỗ lưu trữ mới cho 2 tệp này tương ứng với Database mới.  
+
+Hai đường dẫn này có thể đặt tùy ý, miễn thư mục đấy tồn tại và tài khoản SQL Server có quyền thêm file. Hoặc có thể sử dụng đường dẫn mặc định của SQL Server bằng câu lệnh sau:  
+```sql
+SELECT
+    SERVERPROPERTY('InstanceDefaultDataPath') AS DefaultDataPath,
+    SERVERPROPERTY('InstanceDefaultLogPath')  AS DefaultLogPath;
+```
+Tuy nhiên nên đặt 2 tệp này vào 2 thư mục khác nhau để tránh chen nhau ghi dữ liệu vào cùng 1 thư mục, cũng như 2 tệp này có thể nặng nếu dữ liệu lớn.  
+Sau đó tiến hành bắt đầu ghi dữ liệu vào DB bằng bản Full gần nhất như dưới đây.
+
+```sql
+-- Restore FULL (đến DB mới)
+RESTORE DATABASE [YourDB_Clone]
+FROM DISK = N'E:\SQL_Backup\YourDB\Full\YourDB_FULL_20250914_020000_1.bak',
+    DISK = N'E:\SQL_Backup\YourDB\Full\YourDB_FULL_20250914_020000_2.bak',
+    DISK = N'E:\SQL_Backup\YourDB\Full\YourDB_FULL_20250914_020000_3.bak',
+    DISK = N'E:\SQL_Backup\YourDB\Full\YourDB_FULL_20250914_020000_4.bak'
+WITH NORECOVERY, REPLACE, CHECKSUM, STATS = 5,
+    MOVE N'YourDB'     TO N'X:\SQL_Data\YourDB_Clone.mdf',
+    MOVE N'YourDB_log' TO N'Y:\SQL_Log\YourDB_Clone.ldf';
+```
+
+> Nếu thời điểm cần khôi phục trùng với bản full backup hay chỉ muốn dừng ở bản full backup thì thay tham số `NORECOVERY` thành `RECOVERY`  
+
+#### 4.2 Khôi phục bản Diff gần nhất
+Các `Diffferential backup` được sao lưu hằng ngày (trừ ngày chủ nhật trùng với `Full backup`) thì bản Diff gần nhất là `00:30:00 16/09/2025`.  
+Ta tiến hành khôi phục tiếp theo (tham số `NORECOVERY` là có ý nghĩa chưa hoàn thành khôi phục) từ bản Diff gần nhất.  
+
+`Khôi phục tiếp phần Diff Log nếu có các bản backup này vào Databse gốc`  
+```sql
+RESTORE DATABASE [MyDB]
+FROM DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_090000.bak' -- DIFF 9h sáng
+WITH NORECOVERY, CHECKSUM, STATS = 5;
+```
+
+`Khôi phục tiếp phần Diff Log nếu có các bản backup này vào Databse mới`  
+
+```sql
+RESTORE DATABASE [MyDB_Clone]
+FROM DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_090000_1.bak',
+    DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_090000_2.bak',
+    DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_090000_3.bak',
+    DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_090000_4.bak'
+WITH NORECOVERY, CHECKSUM, STATS = 5;
+```
+
+> Nếu thời điểm cần khôi phục trùng với bản Diff backup hay chỉ muốn dừng ở bản Diff backup thì thay tham số `NORECOVERY` thành `RECOVERY`  
+> Nếu không có các Diff backup thì có thể bỏ qua, nhảy luôn xuống Log backup (sẽ lâu hơn, nhiều file hơn)  
+
+#### 4.3 Khôi phục các bản Log gần nhất
+Các bản `Log backup` được sao lưu cách nhau 15 phút hằng ngày bắt đầu từ `00:45:00` (00:30 đã có bản Diff).  
+Từ thời điểm cần khôi phục `10:23:00 16/09/2025` ta có các bản `Log backup` sau:  
+
+- 00:45:00 16/09/2025  
+- 01:00:00 16/09/2025  
+- 01:15:00 16/09/2025  
+- 01:30:00 16/09/2025  
+... 
+- 10:30:00 16/09/2025
+
+Khi đó ta sẽ chạy lần lượt các tệp `Log Backup` như sau:  
+
+`Khôi phục tiếp phần Log backup nếu có các bản backup này vào Databse cũ`  
+
+```sql
+-- 3) LOGs nối tiếp sau DIFF đến lúc @T
+RESTORE LOG [MyDB]
+FROM DISK = N'E:\SQL_Backup\YourDB\Log\YourDB_LOG_20250916_091500.trn' WITH NORECOVERY, CHECKSUM, STATS = 5;
+RESTORE LOG [MyDB]
+FROM DISK = N'E:\SQL_Backup\YourDB\Log\YourDB_LOG_20250916_093000.trn' WITH NORECOVERY, CHECKSUM, STATS = 5;
+RESTORE LOG [MyDB]
+FROM DISK = N'E:\SQL_Backup\YourDB\Log\YourDB_LOG_20250916_094500.trn' WITH NORECOVERY, CHECKSUM, STATS = 5;
+-- ... các file thời gian còn lại ...
+
+-- File LOG cuối cùng chứa thời gian cần khôi phục: dừng tại đúng thời điểm
+RESTORE LOG [YourDB]
+FROM DISK = N'E:\SQL_Backup\YourDB\Log\YourDB_LOG_20250916_103000.trn'
+WITH STOPAT = '2025-09-16T10:23:00', RECOVERY, CHECKSUM, STATS = 5;
+```
+
+Đối với viêc ghi đè DB cũ, nếu tồn tại tệp `Tail Log` được thực hiện khi backup cuối trước (trước khi vào chế độ RECOVY) tệp log cuối cùng sử dụng như các tệp log khác, còn tail log thì sử dung như sau:  
+```sql
+-- (E) TAIL cuối cùng: dừng đúng thời điểm (nếu cần) rồi mở DB
+RESTORE LOG [Docker_DB]
+FROM DISK = N'E:\SQL_Backup\Docker_DB\tail\Docker_DB_TAIL_20250916_120000.trn'
+WITH STOPAT = '2025-09-16T10:23:00',  -- hoặc bỏ STOPAT nếu muốn tới cuối tail
+    RECOVERY, CHECKSUM, STATS = 5;
+```
+
+>  Lưu ý:  
+>  Mở lại nhiều user (nếu bạn từng Single_User)  
+> ALTER DATABASE [Docker_DB] SET MULTI_USER;  
+
+`Khôi phục tiếp phần Log backup nếu có các bản backup này vào Databse mới`  
+```sql
+RESTORE LOG [YourDB_Clone]
+FROM DISK = N'E:\SQL_Backup\YourDB\log\YourDB_LOG_20250916_091500_1.trn',
+    DISK = N'E:\SQL_Backup\YourDB\log\YourDB_LOG_20250916_091500_2.trn',
+    DISK = N'E:\SQL_Backup\YourDB\log\YourDB_LOG_20250916_091500_3.trn',
+    DISK = N'E:\SQL_Backup\YourDB\log\YourDB_LOG_20250916_091500_4.trn'
+WITH NORECOVERY, CHECKSUM, STATS = 5;
+
+-- ... tiếp các LOG ...
+RESTORE LOG [YourDB_Clone]
+FROM DISK = N'E:\SQL_Backup\YourDB\log\YourDB_LOG_20250916_103000_1.trn',
+    DISK = N'E:\SQL_Backup\YourDB\log\YourDB_LOG_20250916_103000_2.trn',
+    DISK = N'E:\SQL_Backup\YourDB\log\YourDB_LOG_20250916_103000_3.trn',
+    DISK = N'E:\SQL_Backup\YourDB\log\YourDB_LOG_20250916_103000_4.trn'
+WITH STOPAT = '2025-09-16T10:23:00', RECOVERY, CHECKSUM, STATS = 5;
+```
+
+> STOPAT sẽ dừng backup tại thời điểm 10:23 phút, mặc dù tệp cuối cùng đến 10:30  
+> Nếu muốn dừng tại 10:30 thì có thể bỏ đi tham số STOPAT  
+> Tệp log cuối cùng dừng lại quá trình khôi phục DB sẽ có tham số `RECOVERY`  
+
+## 5. Tự động hóa quá trình
+### 4.1 SQL Server Agent Jobs (phổ biến nhất)
+Tạo 3 jobs: FULL, DIFF, LOG với T-SQL trên.  
+
+Lập Schedules tương ứng.  
+
+Bật Operator + Database Mail để gửi email khi job thất bại.  
+
+(Khuyên) Dùng Ola Hallengren’s Maintenance Solution để có Job chuẩn (DatabaseBackup/Integrity/Index).  
+
+### 4.2 Tích hợp python  
+Không khuyến khích Python trực tiếp thực thi BACKUP làm “primary path”.  
+
+Python phù hợp để gọi sp_start_job (kích job Agent), đẩy file lên Object Storage, giám sát checksum/kích thước, gửi cảnh báo.  
+
+## 5. Khôi phục cơ sở dữ liệu
+
+### 5.1 Tail-Log Backup
+Nếu DB còn online và muốn tối đa dữ liệu  
+```sql
+BACKUP LOG [YourDB]
+TO DISK = N'\\backup-svr\sql\YourDB\tail\YourDB_TAIL_20250915_1105.trn'
+WITH NO_TRUNCATE, NORECOVERY;  -- đặt DB vào trạng thái restoring
+
+```
+
+### 5.2 Restore full, dif, log,...
+
+```sql -- Full
+RESTORE DATABASE [YourDB]
+FROM DISK = N'...\YourDB_FULL_20250914_1.bak', DISK = N'...\_2.bak'
+WITH NORECOVERY, REPLACE, STATS=10;
+
+-- Differential (nếu chạy mỗi ngày)
+RESTORE DATABASE [YourDB]
+FROM DISK = N'...\YourDB_DIFF_20250915.bak'
+WITH NORECOVERY, STATS=10;
+
+-- Log đến mốc thời gian (STOPAT)
+RESTORE LOG [YourDB]
+FROM DISK = N'...\YourDB_LOG_20250915_1030.trn'
+WITH NORECOVERY, STATS=10;
+
+RESTORE LOG [YourDB]
+FROM DISK = N'...\YourDB_LOG_20250915_1045.trn'
+WITH RECOVERY, STOPAT = '2025-09-15T10:40:00';  -- ví dụ quay về 10:40
+```
