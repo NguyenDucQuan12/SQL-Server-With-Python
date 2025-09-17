@@ -530,6 +530,9 @@ DROP FULLTEXT CATALOG EmployeeFTCatalog;
 > Tách biệt hạ tầng: Các nơi lưu trữ backup nên là các nơi khác nhau để tránh rủi ro **mất mát tập trung**  
 > Tự động hóa: Tự động hóa các quy trình, có cảnh báo/theo dõi, thử nghiệp khôi phục dữ liệu định kỳ để đảm bảo hệ thống hoạt động trơn tru  
 
+`Backup FULL/DIFF/LOG` đều là online, cho phép đọc/ghi đồng thời. Chúng không khoá bảng theo kiểu chặn DML, nhưng tạo I/O đọc nhiều → có thể tăng latency I/O nếu đĩa yếu.  
+Vì thế ta cần lên lịch backup vào khung giờ hợp lý, dùng `striping + tách ổ Data/Log/Backup` để giảm tác động.  
+
 ## 1. Thời gian sao lưu
 Với hệ thống vận hành 24/7 thì lịch sao lưu được khuyến cáo như sau:  
 Với sao lưu full: `Mỗi chủ nhật 00:00 (tần suất 1 lần/1 tuần)`  
@@ -577,7 +580,7 @@ Trong đó:
 - **[YourDB]**:  Là tên CSDL muốn tạo bản backup full
 - **N'E:\SQL_Backup\YourDB\Full\YourDB_FULL_20250916_000000.bak'**: Là đường dẫn đến tệp backup full được lưu  
 - **CHECKSUM**: Tính và ghi checksum vào file backup; khi restore/verify, SQL Server sẽ so–khớp checksum để phát hiện lỗi đọc/ghi/corruption  
-- **COMPRESSIOM**: Nén file backup (thường giảm 30–70% dung lượng). Tuy nhiên tốn CPU khi backup và restore  
+- **COMPRESSIOM**: Nén file backup (thường giảm 30–70% dung lượng). Tuy nhiên tốn CPU khi backup và restore (Không khả dụng với SQL Server Express)  
 - **STATS**: Hiển thị tiến độ mỗi 5% (Theo dõi tiến độ khi chạy job Agent)  
 
 > [!NOTE]  
@@ -608,7 +611,7 @@ Sau đó nhấn `OK` và tiến hành chọn quyền hạn cho người dùng v�
 
 Như vậy là đã sửa được lỗi `Acess Denied`.  
 
-Với các CSDL lớn có thể ảnh hưởng đến hiệu suất, sử dùng striping (nhiều file .bak) cho DB rất lớn để tăng throughput; cân nhắc MAXTRANSFERSIZE, BUFFERCOUNT nếu cần tối ưu hiệu năng. Việc này giúp tăng thông lượng I/O và rút ngắn thời gian backup/restore. Tất cả các “stripe” đều bắt buộc phải có mặt khi restore.  
+Với các CSDL lớn có thể ảnh hưởng đến hiệu suất, sử dùng striping (nhiều file .bak) cho DB rất lớn để tăng throughput; cân nhắc MAXTRANSFERSIZE, BUFFERCOUNT nếu cần tối ưu hiệu năng. Việc này giúp tăng thông lượng I/O và rút ngắn thời gian backup/restore. Tất cả các `stripe` đều bắt buộc phải có mặt khi khôi phục CSDL.  
 
 ```sql
 BACKUP DATABASE [YourDB]
@@ -622,7 +625,7 @@ WITH NAME = N'YourDB Full 20250916_000000',
     BUFFERCOUNT = 64;             -- điều chỉnh theo I/O thực tế
 ```
 
-Ta có thể sử dụng `Dynamic SQL` để tự động tạo ngày giờ như sau:  
+Ta có thể sử dụng `Dynamic SQL` để tự động tạo tệp theo ngày giờ hiện tại như sau:  
 ```SQL
 DECLARE @stamp sysname =
     CONVERT(varchar(8), GETDATE(), 112) + '_' +
@@ -630,13 +633,13 @@ DECLARE @stamp sysname =
 
 DECLARE @cmd nvarchar(max);
 
-SET @cmd = N'BACKUP DATABASE [Docker_DB]
-TO ' +
-N'DISK = N''E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_' + @stamp + '_1.bak'',' +
-N' DISK = N''E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_' + @stamp + '_2.bak'',' +
-N' DISK = N''E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_' + @stamp + '_3.bak'',' +
-N' DISK = N''E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_' + @stamp + '_4.bak'''
-+ N'NAME = N''Docker_DB Full ' + @stamp + ''',
+SET @cmd = 
+N'BACKUP DATABASE [Docker_DB] TO ' +
+    N'DISK = N''E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_' + @stamp + '_1.bak'','  +
+    N' DISK = N''E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_' + @stamp + '_2.bak'',' +
+    N' DISK = N''E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_' + @stamp + '_3.bak'',' +
+    N' DISK = N''E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_' + @stamp + '_4.bak'''  +
+N'WITH NAME = N''Docker_DB Full ' + @stamp + ''',
     CHECKSUM, COMPRESSION, STATS = 5,
     MAXTRANSFERSIZE = 4194304,
     BUFFERCOUNT = 64;';
@@ -721,11 +724,11 @@ WITH COMPRESSION, CHECKSUM, STATS = 10,
 
 Hoặc có thể sử dụng strip file cho `Log backup` nếu số lượng dữ liệu lớn để tăng tốc backup.  
 ```sql
-BACKUP LOG [MyDB]
+BACKUP LOG [YourDB]
 TO  DISK = N'E:\SQL_Backup\YourDB\log\YourDB_LOG_'+@stamp+'_1.trn',
-    DISK = N'F:\SQL_Backup\YourDB\log\YourDB_LOG_'+@stamp+'_2.trn',
-    DISK = N'G:\SQL_Backup\YourDB\log\YourDB_LOG_'+@stamp+'_3.trn',
-    DISK = N'H:\SQL_Backup\YourDB\log\YourDB_LOG_'+@stamp+'_4.trn'
+    DISK = N'E:\SQL_Backup\YourDB\log\YourDB_LOG_'+@stamp+'_2.trn',
+    DISK = N'E:\SQL_Backup\YourDB\log\YourDB_LOG_'+@stamp+'_3.trn',
+    DISK = N'E:\SQL_Backup\YourDB\log\YourDB_LOG_'+@stamp+'_4.trn'
 WITH NAME = N'YourDB Log '+@stamp,
     CHECKSUM, COMPRESSION, STATS = 5,
     MAXTRANSFERSIZE = 4194304, BUFFERCOUNT = 64;
@@ -739,17 +742,106 @@ SELECT TOP (200)
        type, -- D=Full, I=Diff, L=Log
        first_lsn, last_lsn, checkpoint_lsn, database_backup_lsn
 FROM msdb.dbo.backupset
-WHERE database_name = 'MyDB'
+WHERE database_name = 'YourDB'
 ORDER BY backup_finish_date DESC
 ```
-
 Thay `database_name` đúng với tên DB cần kiểm tra. Các trạng thái log được quy định như sau, `D: Full backup`, `I: Differential backup` và `L: Log backup`.  
+
+Ta có câu lệnh sau có thể xem chi tiết hơn, hoặc dùng nó để tìm các bản backup rồi ghép với nhau.  
+```sql
+;WITH S AS (
+  SELECT
+    bs.backup_set_id, bs.database_name, bs.type, bs.is_copy_only,
+    bs.backup_start_date, bs.backup_finish_date,
+    bs.first_lsn, bs.last_lsn,
+    bs.database_backup_lsn, bs.differential_base_lsn,
+    STRING_AGG(bmf.physical_device_name, ' | ') WITHIN GROUP (ORDER BY bmf.family_sequence_number) AS files
+  FROM msdb.dbo.backupset bs
+  JOIN msdb.dbo.backupmediafamily bmf
+    ON bs.media_set_id = bmf.media_set_id
+  WHERE bs.database_name = N'Docker_DB'
+  GROUP BY bs.backup_set_id, bs.database_name, bs.type, bs.is_copy_only,
+           bs.backup_start_date, bs.backup_finish_date,
+           bs.first_lsn, bs.last_lsn, bs.database_backup_lsn, bs.differential_base_lsn
+)
+SELECT
+  CASE type WHEN 'D' THEN 'FULL'
+            WHEN 'I' THEN 'DIFF'
+            WHEN 'L' THEN 'LOG'  END AS bk_type,
+  is_copy_only,
+  backup_start_date, backup_finish_date,
+  database_backup_lsn, differential_base_lsn,
+  first_lsn, last_lsn,
+  files
+FROM S
+ORDER BY backup_finish_date;
+```
+
+![alt text](Image/history_backup_DB.png)  
+
+Ta đọc dữ liệu như sau:  
+
+- Full backup: Là bản sao lưu đầy đủ của 1 tuần, ta muốn khôi phục tuần nào thì ta lấy tuần đó, hoặc lấy bản full mới nhất làm gốc (ko sử dụng bản có cột `IS_COPY_ONLY` là 1 làm gốc).  
+- Diff backup: Là bản sao lưu hằng ngày, 1 tuần sẽ có 6 bản sao lưu (ngày chủ nhật ko có vì trùng với `full backup` được thực hiện ở chủ nhật), nếu ta cần khôi phục đến thứ 2 thì chỉ cần lấy 1 bản `Diff backup` của ngày thứ 2, còn nếu khôi phục đến thứ 5 thì cần lấy 4 bản `Diff backup`, các bản `Diff backup` lần lượt nằm phía dưới bản `Full backup` ta lấy trước đó.  
+- Log backup: Là các bản sao lưu cách nhau 15 phút trong 1 ngày, 1 ngày sẽ có `74 bản sao lưu` tính từ 0:45 - 24:00 (0:30 sao lưu Diff nên bắt đầu từ 0:45), nếu ta cần khôi phục đến thời điểm 0:45 thì chỉ cần lấy 1 bản `Log backup` của ngày cuối cùng, còn nếu sao lưu đến thời điểm khác thì lấy tương ứng số lượng bản `Log backup` cho đến thời điểm gần với thời điểm đó.   
+
+Với mỗi bản `Diff backup` thì có cột `differential_base_lsn` tham chiếu tới cột `first_lsn` của `Full backup` để biết `Diff backup` này **Phải đi cùng khi khôi phục** với bản `Full backup` tương ứng đấy.  
+
+Với mỗi bản `Log backup` luôn nằm dưới bản `Full backup (nếu ko có Diff backup)` hoặc `Diff backup` trước nó và giá trị 2 cột `first_lsn` và `last_lsn` luôn nối tiếp nhau theo thời gian. Nếu bạn lấy 3 bản `Log backup` thì phải lấy 3 bản có thời gian nối tiếp nhau thì mới sử dụng được cho việc khôi phục CSDL.  
+
+Cột `files` sẽ chứa các đường dẫn tới tệp sao lưu được lưu khi nó thực hiện sao lưu. Để sử dụng đường dẫn này thì **luôn luôn phải kiểm tra xem tệp này còn tồn tại ở thư mục này không**, bởi lúc sao lưu nó có thể ằm ở đây, nhưng sau 1 thời gian bị chuyển đi chỗ khác.  
 
 ## 4. Khôi phục dữ liệu
 
 Khi ta có các bản backup dữ liệu từ trước thì ta có thể khôi phục lại dữ liệu tại từng thời điểm tương ứng với các bản backup.  
 > Lưu ý nếu khi sao lưu dữ liệu sử dụng striping để tách nhỏ các file thì khi khôi phục phải có đầy đủ các file đã tách nhỏ ra.  
 
+Khi khôi phục dữ liệu mà `ghi đè dữ liệu lên CSDL gốc`, ta cần lưu ý tránh gây xung đột trong quá trình khôi phục như sau.  
+
+- Backup tail-log with norecovery  
+```sql
+BACKUP LOG [YourDB]
+TO DISK = N'E:\...\YourDB_TAIL_yyyymmdd_hhmmss.trn'
+WITH NORECOVERY, CHECKSUM, STATS = 5;
+```
+Trước khi khôi phục ta chạy lệnh trên, lệnh này sẽ tạo ra 1 bản `log backup` ngay tức thì, và khi chạy xong nó sẽ đưa CSDL vào trạng thái `RESTORING`, khiến cho mọi kết nối mới tới CSDL đều bị chặn, chỉ còn mỗi kết nối khôi phục dữ liệu hiện tại. Điều này đảm bảo trong quá trình khôi phục không xảy ra lỗi ngoài ý muốn đến từ người dùng thực hiện các lệnh `INSERT`, `DELETE`, `UPDATE`, ...  
+
+- SINGER_USER/MULTI_USER  
+Trong trường hợp CSDL hỏng, không thể tạo `backup tail-log` thì ta sử dụng phương án này.  
+Tiến hành hủy mọi kết nối hiện tại và chỉ cho 1 kết nối tới DB để khôi phục.  
+```sql
+ALTER DATABASE [YourDB] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+```
+
+Ngay sau khi hủy mọi kết nối, chỉ còn duy nhất được phép 1 kết nối tới CSDL, vì vậy ta cần ngay lập tức tiến hành `RESTORE` CSDL để không bị người khác cướp mất 1 kết nối duy nhất còn lại.  
+
+Còn nếu kết nối đã bị chiếm bởi người khác, ta tiến hành xem kết nối đấy đến từ đâu bằng cách chạy lệnh truy vấn sau:  
+```sql
+SELECT s.session_id, s.host_name, s.program_name, s.login_name
+FROM sys.dm_exec_sessions s
+JOIN sys.dm_exec_connections c ON s.session_id = c.session_id
+WHERE c.most_recent_sql_handle IS NOT NULL
+    AND DB_ID(N'YourDB') = DB_ID(s.database_id); -- nếu version hỗ trợ
+```
+
+Hoặc chạy lệnh sau để xem:  
+```sql
+SELECT session_id, host_name, program_name, login_name
+FROM sys.dm_exec_sessions
+WHERE database_id = DB_ID(N'YourDB');
+```
+
+Sau đó tiến hành hủy bỏ kết nối đấy bằng lệnh:  
+```sql
+KILL <session_id>;
+```
+
+Rồi chạy lại lệnh `ALTER DATABASE [YourDB] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;` và tiến hành `RESTORE` ngay lập tức.  
+Và ngay khi xong quá trình khôi phục, ta cần trả lại `MULTI_USER` để cho phép kết nối cùng lúc.  
+
+```sql
+ALTER DATABASE [YourDB] SET MULTI_USER;
+```
 ### 4.1 Xác minh các file backup
 Trước khi khôi phục dữ liệu ta cần tiến hành xác minh các file backup, có 3 mức độ phổ biến như sau:  
 Đọc siêu dữ liệu của 1 tệp backup.  
@@ -772,9 +864,14 @@ FROM DISK = N'E:\SQL_Backup\Docker_DB\Log\Docker_DB_20250916_071500.trn'
 WITH CHECKSUM;
 ```
 Câu lệnh này kiểm tra tính toàn vẹn ở mức backup (không tạo DB mới) dựa trên checksum được tạo ở tệp backup khi backup ban đầu.
-Lưu ý: VERIFYONLY không phát hiện mọi dạng lỗi logic trong dữ liệu. Kiểm tra triệt để nhất vẫn là test restore lên môi trường khác rồi chạy DBCC CHECKDB.  
+Lưu ý: `VERIFYONLY` không phát hiện mọi dạng lỗi logic trong dữ liệu. Kiểm tra triệt để nhất vẫn là test restore lên môi trường khác rồi chạy DBCC CHECKDB.  
 Lệnh này cũng được gọi sau mỗi lần backup, kiểm tra xem tệp backup có hỏng hay không.  
 
+Chạy câu lệnh này sau khi `thử nghiệm restore ở DB mới`:  
+```sql
+DBCC CHECKDB('YourDB_Clone') WITH NO_INFOMSGS;
+```
+Nếu 
 ### 4.2 Kịch bản thực hiện khôi phục dữ liệu
 Để khôi phục được CSDL thì ta cần có ít nhất 1 bản `Full backup` tại thời điểm mới nhất (gần thời gian ta muốn dữ liệu trở về như cũ)  
 Các bản `Differential backup` hoặc `Log backup` nếu có thì việc khôi phục dữ liệu càng chi tiết, càng đầy đủ hơn tại thời điểm ta muốn.  
@@ -783,11 +880,13 @@ Tiếp theo nếu có bản `Differential backup` thì ta khôi phục tiếp b�
 Cuối cùng là những bản `Log backup` nếu tồn tại thì thực hiện khôi phục từng bản `Log backup` cho đến thời điểm ta muốn.  
 Chi tiết như sau.  
 
-Ví dụ muốn khôi phục CSDL về thời điểm : `10:23:00 16/09/2025`.  
+> Ví dụ muốn khôi phục CSDL về thời điểm : `10:23:00 16/09/2025` (thứ 3 trong tuần).  
+
 Ta có 2 lựa chọn, 1 là khôi phục dữ liệu vào 1 Database mới, hoặc có thể khôi phục dữ liệu cũ về Database gốc.  
 Ta cần phải thực hiện theo thứ tự từng bước từ `Full --> Diff --> Log` cho đến khi đến thời điểm cần khôi phục hoặc gần với thời điểm đấy nhất.  
 
-Trước khi restore ta cần chuyển context sang master để thao tác.  
+Trước khi restore ta cần chuyển `context sang master` để thao tác.  
+
 ```sql
 USE master;
 GO
@@ -797,17 +896,18 @@ GO
 Bản `Full backup` mới nhất, gần nhất với thời điểm cần khôi phục là `00:00:00 14/09/2025` là ngày sao lưu vào chủ nhật của tuần trước đó.  
 
 `Khôi phục vào Database gốc`  
-Trước khi ghi đè dữ liệu vào database gốc, ta **nên backup thêm 1 tệp Log backup lần nữa** cho các giao dịch cuối cùng.  
+Trước khi ghi đè dữ liệu vào database gốc, ta **nên backup thêm 1 tệp Log backup lần nữa** cho các giao dịch cuối cùng, sau đó sẽ đưa DB vào trạng thái `RESTORE`, không còn cho phép mở các kết nối mới nữa .  
+Bản `Tail backup` này dùng cho trường hợp khôi phục dữ liệu đến thời điểm hiện tại, mới nhất(có nghĩa là bây giờ vừa đúng 10:25:00 16/09/2025).  
 
 ```sql
 BACKUP LOG [YourDB]
 TO DISK = N'E:\SQL_Backup\YourDB\tail\YourDB_TAIL_20250916_104500.trn'
 WITH NORECOVERY, CHECKSUM, STATS = 5;
--- DB sẽ vào trạng thái RESTORING (không còn kết nối mới)
 ```
 
-Nếu không thể thao tác đưa DB đang hoạt động vào trạng thái `RESTORE` thì ta thực hiện các bước sau:  
-- Cô lập kết nối tới DB.  
+Nếu không thể thao tác đưa DB đang hoạt động vào trạng thái `RESTORE` (do DB đã hỏng), thì ta thực hiện các bước sau:  
+
+- Cô lập kết nối tới DB trước khi thực hiện khôi phục dữ liệu.  
 ```sql
 ALTER DATABASE [YourDB] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
 ```
@@ -815,16 +915,17 @@ ALTER DATABASE [YourDB] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
 ```sql
 ALTER DATABASE [YourDB] SET MULTI_USER;
 ```
-Sau khi cô lập kết nối thì mới bắt đầu tiến hành khôi phục DB bằng việc khôi phục từ bản Full.  
+Sau khi cô lập kết nối thì mới bắt đầu tiến hành khôi phục DB bằng việc khôi phục từ bản `Full backup` đầu tiên.  
 
+`Khôi phục vào database cũ (ghi đè dữ liệu vào DB gốc)`  
 ```sql
 RESTORE DATABASE [YourDB]
-FROM DISK = N'E:\SQL_Backup\YourDB\Full\YourDB_FULL_20250914_020000.bak' -- FULL Chủ nhật
+FROM DISK = N'E:\SQL_Backup\YourDB\Full\YourDB_FULL_20250914_020000.bak' -- FULL ngày chủ nhật gần nhất với thời điểm khôi phục
 WITH NORECOVERY, REPLACE, CHECKSUM, STATS = 5;
 ```
 
 `Khôi phục vào 1 database mới`  
-Việc khôi phục vào 1 DB mới không cần chuyển DB sang trạng thái `RESTORE` hay `Cô lập kết nối DB`  
+Việc khôi phục vào 1 DB mới không cần chuyển DB sang trạng thái `RESTORE` hay `Cô lập kết nối DB`. Khôi phục vào DB mới, kiểm tra xem DB mới có an toàn, có truy cập bình thường không, rồi sau đó mới thật sự ghi đè dữ liệu lên DB cũ, đây cũng là 1 cách thực hiện chuyên nghiệp.  
 Tuy nhiên trong các bản backup luôn có 2 thông tin chứa đường dẫn tệp `Log` và `Data` của mỗi Database. Khi ta chuyển sang 1 Database mới thì cần chỉ định chỗ lưu trữ mới cho 2 tệp này tương ứng với Database mới.  
 
 Hai đường dẫn này có thể đặt tùy ý, miễn thư mục đấy tồn tại và tài khoản SQL Server có quyền thêm file. Hoặc có thể sử dụng đường dẫn mặc định của SQL Server bằng câu lệnh sau:  
@@ -856,15 +957,15 @@ Ta tiến hành khôi phục tiếp theo (tham số `NORECOVERY` là có ý ngh�
 
 `Khôi phục tiếp phần Diff Log nếu có các bản backup này vào Databse gốc`  
 ```sql
-RESTORE DATABASE [MyDB]
-FROM DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_090000.bak' -- DIFF 9h sáng
+RESTORE DATABASE [YourDB]
+FROM DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_000000.bak' -- DIFF 0h30 sáng
 WITH NORECOVERY, CHECKSUM, STATS = 5;
 ```
 
 `Khôi phục tiếp phần Diff Log nếu có các bản backup này vào Databse mới`  
 
 ```sql
-RESTORE DATABASE [MyDB_Clone]
+RESTORE DATABASE [YourDB_Clone]
 FROM DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_090000_1.bak',
     DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_090000_2.bak',
     DISK = N'E:\SQL_Backup\YourDB\Diff\YourDB_DIFF_20250916_090000_3.bak',
@@ -892,25 +993,25 @@ Khi đó ta sẽ chạy lần lượt các tệp `Log Backup` như sau:
 
 ```sql
 -- 3) LOGs nối tiếp sau DIFF đến lúc @T
-RESTORE LOG [MyDB]
-FROM DISK = N'E:\SQL_Backup\YourDB\Log\YourDB_LOG_20250916_091500.trn' WITH NORECOVERY, CHECKSUM, STATS = 5;
-RESTORE LOG [MyDB]
-FROM DISK = N'E:\SQL_Backup\YourDB\Log\YourDB_LOG_20250916_093000.trn' WITH NORECOVERY, CHECKSUM, STATS = 5;
-RESTORE LOG [MyDB]
-FROM DISK = N'E:\SQL_Backup\YourDB\Log\YourDB_LOG_20250916_094500.trn' WITH NORECOVERY, CHECKSUM, STATS = 5;
+RESTORE LOG [YourDB]
+FROM DISK = N'E:\SQL_Backup\YourDB\Log\YourDB_LOG_20250916_004500.trn' WITH NORECOVERY, CHECKSUM, STATS = 5;
+RESTORE LOG [YourDB]
+FROM DISK = N'E:\SQL_Backup\YourDB\Log\YourDB_LOG_20250916_010000.trn' WITH NORECOVERY, CHECKSUM, STATS = 5;
+RESTORE LOG [YourDB]
+FROM DISK = N'E:\SQL_Backup\YourDB\Log\YourDB_LOG_20250916_011500.trn' WITH NORECOVERY, CHECKSUM, STATS = 5;
 -- ... các file thời gian còn lại ...
 
--- File LOG cuối cùng chứa thời gian cần khôi phục: dừng tại đúng thời điểm
+-- File LOG cuối cùng chứa thời gian cần khôi phục: dừng tại đúng thời điểm (10:23:00 16/09/2025), hoặc bỏ qua tham số STOPAT thì nó khôi phục đến 10:30
 RESTORE LOG [YourDB]
 FROM DISK = N'E:\SQL_Backup\YourDB\Log\YourDB_LOG_20250916_103000.trn'
 WITH STOPAT = '2025-09-16T10:23:00', RECOVERY, CHECKSUM, STATS = 5;
 ```
 
-Đối với viêc ghi đè DB cũ, nếu tồn tại tệp `Tail Log` được thực hiện khi backup cuối trước (trước khi vào chế độ RECOVY) tệp log cuối cùng sử dụng như các tệp log khác, còn tail log thì sử dung như sau:  
+Đối với viêc ghi đè DB cũ, nếu muốn sử dụng tệp `Tail Log` khi backup lần cuối (trước khi đưa DB vào chế độ RECOVERY) thì `LOG backup` cuối cùng thay tham số `RECOVERY` thành `NORECOVERY` và thay thêm lệnh `RESTORE` như sau:  
 ```sql
--- (E) TAIL cuối cùng: dừng đúng thời điểm (nếu cần) rồi mở DB
+-- TAIL cuối cùng: dừng đúng thời điểm (nếu cần)
 RESTORE LOG [Docker_DB]
-FROM DISK = N'E:\SQL_Backup\Docker_DB\tail\Docker_DB_TAIL_20250916_120000.trn'
+FROM DISK = N'E:\SQL_Backup\Docker_DB\Tail\Docker_DB_TAIL_20250916_105000.trn'
 WITH STOPAT = '2025-09-16T10:23:00',  -- hoặc bỏ STOPAT nếu muốn tới cuối tail
     RECOVERY, CHECKSUM, STATS = 5;
 ```
@@ -942,6 +1043,562 @@ WITH STOPAT = '2025-09-16T10:23:00', RECOVERY, CHECKSUM, STATS = 5;
 > Tệp log cuối cùng dừng lại quá trình khôi phục DB sẽ có tham số `RECOVERY`  
 
 ## 5. Tự động hóa quá trình
+
+### 5.1 Tự động tìm tệp và đường dẫn sao lưu
+Đoạn mã tự động tìm các bản backup tương ứng từ lịch sử backup của DB và ghép chuỗi lại với nhau và khôi phục.  
+
+```sql
+SET NOCOUNT ON;
+```
+Câu lệnh này ngăn chặn hiển thị `X rows affected` để ko nhầm lẫn với các câu lệnh print.  
+
+Tiếp theo ta cấu hình các tham số cho quá trình khôi phục dữ liệu.  
+```sql
+DECLARE @SourceDb sysname = N'Docker_DB';  -- tên DB nguồn mà ta đã tạo bản backup
+DECLARE @TargetDb sysname = N'Docker_DB_Restore';  -- tên DB sẽ được khôi phục, nếu ghi trùng tên DB gốc thì sẽ tiến hành ghi đè dữ liệu cũ vào DB gốc
+DECLARE @StopAt   datetime = '2025-09-16T11:52:30';  -- Thời điểm khôi phục, nếu NULL sẽ tự động khôi phục tới cuối chuỗi LOG Backup
+DECLARE @Overwrite bit = 0;   -- nếu giá trị 1 thì ghi đè DB đích nếu đã tồn tại (tương ứng lệnh WITH REPLACE), dùng cho nếu ghi đè dữ liệu cũ của DB gốc
+DECLARE @DryRun    bit = 1;  -- 1: Hiển thị câu lệnh cuối cùng (không thực thi lệnh mà chỉ hiển thị cho người xem),  0: thực thi câu lệnh restore
+DECLARE @UseChecksum bit = 1;  -- Tương ứng lệnh WITH CHECKSUM dùng để kiểm tra CHECKSUM của các bản backup
+DECLARE @UseStats    int = 5;  -- SQL sẽ báo tiến độ với 5% mỗi lần, đổi thành số nào tuywf ý từ 1-100
+DECLARE @Relocate    bit = 1;  -- 1: tạo MOVE sang thư mục đích (@DataPath, @LogPath); 0 → giữ nguyên đường dẫn trong backup (dễ lỗi nếu trùng/không tồn tại).
+DECLARE @DataPath nvarchar(260)= N'D:\SQL_Data\'; -- nơi đặt file .mdf/.ndf và .ldf (khi @Relocate=1).
+DECLARE @LogPath  nvarchar(260)= N'E:\SQL_Log\';  -- nơi đặt file .mdf/.ndf và .ldf (khi @Relocate=1).
+```
+
+Đầu tiên ta kiểm tra xem thời điểm người dùng muốn khôi phục là đâu, nếu null thì đặt 1 mốc rấ xa để coi như khôi phục tới thời điểm mới nhất.  
+```sql
+IF @StopAt IS NULL SET @StopAt = '9999-12-31';
+```
+Sau đó truy vấn lịch sử backup của Database, kiểm tra xem Database này có lịch sử backup chưa, nếu ko có thì là chưa từng backup nên sẽ ko có bản backup nào để thực hiện khôi phục cả. Nếu vậy thì đưa ra thông báo lỗi.  
+
+```sql
+IF NOT EXISTS (SELECT 1 FROM msdb.dbo.backupset WHERE database_name = @SourceDb)
+BEGIN
+    RAISERROR(N'Không thấy lịch sử backup của %s trong msdb.', 16, 1, @SourceDb);
+    RETURN;
+END;
+```
+
+![alt text](Image/get_history_backup_DB.png)
+
+Ví dụ khi truy vấn lịch sử backup của CSDL `Docker_DB` thì có 15 lần thực hiện gọi lệnh backup bao gồm: `Full`, `Diff`, và `Log`.  
+
+Tiếp theo tìm kiếm bản `Full backup` gần nhất so với thời điểm khôi phục (trước hoặc bằng so với thời điểm khôi phục) từ bảng `msdb..backupset` và lưu kết quả đấy vào bảng tạm `#base`  
+```sql
+IF OBJECT_ID('tempdb..#base') IS NOT NULL DROP TABLE #base;
+SELECT TOP (1) *
+INTO #base
+FROM msdb.dbo.backupset
+WHERE database_name = @SourceDb
+    AND type = 'D'               -- FULL
+    AND is_copy_only = 0
+    AND backup_finish_date <= @StopAt
+ORDER BY backup_finish_date DESC;
+```
+
+Nếu bảng tạm `#base` đã tồn tại từ lần chạy trước thì xóa nó đi, ta tạo lại vào câu lệnh bên dưới để tránh xung đột cấu trúc/ dữ liệu.  
+
+![alt text](Image/get_full_backup_on_time.png)
+
+Ví dụ khi tìm kiếm bản `Full backup` gần nhất với thời gian khôi phục là `2025-09-17T09:52:30` thì kết quả trả về là bản backup thứ 12 là 1 bản `Full backup` gần nhất.  
+Sau đấy kiểm tra xem có bản `Full backup` nào được lưu vào `#base` không. Nếu ko có thì dừng khôi phục và thông báo.  
+```sql
+IF NOT EXISTS (SELECT 1 FROM #base)
+BEGIN
+    RAISERROR(N'Không tìm thấy FULL (không COPY_ONLY) phù hợp trước/bằng @StopAt.', 16, 1);
+    RETURN;
+END;
+```
+
+Nếu tồn tại bản `Full backup` thì tiến hành lấy các đường dẫn chứa tệp `.bak` để sử dụng cho `Backup full`.  
+```sql
+SELECT bmf.physical_device_name, bmf.family_sequence_number
+INTO #base_files
+FROM msdb.dbo.backupmediafamily bmf
+JOIN #base b ON bmf.media_set_id = b.media_set_id
+ORDER BY bmf.family_sequence_number;
+```
+Trong đó bảng `backupmediafamily` chứa danh sách các đường dẫn file thuộc cùng 1 `media set (tức là cùng trong 1 lần backup)`.  Rồi lưu các đường dẫn này vào bảng `#base_files` để sau này ghép chuỗi `FROM DISK = '1.bak', DISK = '2.bak', ... , 'n.bak'`  
+
+![alt text](Image/get_physical_device_name_full_backup.png)
+Ví dụ với `Docker_DB` thì lần `Full backup` gần nhất tạo ra 4 file, và đường dẫn tương ứng là `E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_20250917_080722_1.bak`, `E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_20250917_080722_2.bak`, `E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_20250917_080722_3.bak`, `E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_20250917_080722_4.bak`
+
+Tiếp theo ta tìm `Diff backup` nếu nó tồn tại trong quá trình backup và lưu vào bảng tạm `#diff`.  
+```sql
+WITH d AS (
+  SELECT TOP (1) *
+  FROM msdb.dbo.backupset
+  WHERE database_name = @SourceDb
+    AND type = 'I'             -- DIFF
+    AND backup_finish_date <= @StopAt
+    AND database_backup_lsn = (SELECT first_lsn FROM #base)
+  ORDER BY backup_finish_date DESC
+)
+SELECT * INTO #diff FROM d;
+```
+`Diff backup` luôn phải đi kèm cùng 1 với bản `Full backup`, ta có thể kiểm tra bằng cách `database_backup_lsn` của `Diff backup` phải bằng với `first_lns` của bản `Full backup` trước đó. Nếu kết quả trả về không có thì không tồn tại `Diff backup` tương ứng với `Full backup` và ta có thể bỏ qua `Diff backup`.  
+
+Ví dụ kiểm tra bản `Diff backup` cho CSDL `Docker_DB` xem có tồn tại đi kèm với bản `Full backup` gần nhất hay không.  
+
+![alt text](Image/get_diff_backup_on_time.png)
+
+Ta có thể thấy 1 bản ghi `Diff backup` ở lượt backup thứ 13.  
+
+Sau đó tiếp tục tìm kiếm các bản backup của `Diff backup` từ CSDL để sau này ghép chuỗi lại với nhau và ghi vào bảng tạm `#diff_files`.  
+```sql
+IF OBJECT_ID('tempdb..#diff_files') IS NOT NULL DROP TABLE #diff_files;
+IF EXISTS (SELECT * FROM #diff)
+BEGIN
+    SELECT bmf.physical_device_name, bmf.family_sequence_number
+    INTO #diff_files
+    FROM msdb.dbo.backupmediafamily bmf
+    JOIN #diff d ON bmf.media_set_id = d.media_set_id
+    ORDER BY bmf.family_sequence_number;
+END;
+```
+
+![alt text](Image/get_physical_device_name_diff_backup.png)
+
+Ví dụ khi tìm kiếm các bản ghi của `Diff backup` gần nhất, ta có thể thấy bản Diff này được chia (strip) thành 4 tệp nhỏ. Ta cần đầy đủ 4 tệp để có thể khôi phục.  
+
+Cuối cùng là xác định thời điểm bắt đầu cho các `Log backup`.  
+```sql
+DECLARE @StartLsn numeric(25,0) =
+    COALESCE( (SELECT last_lsn FROM #diff), (SELECT last_lsn FROM #base) );
+```
+Nếu tồn tại `Diff backup` thì lấy mốc bắt đầu cho `Log backup` tại thời điểm giá trị `Last_lsn`, còn không thì sử dụng giá trị của `Full backup` thông qua bảng tạm `#base` đã lưu thông tin trước đó.  
+
+Ta tạo 1 bảng tạm để chứa tất cả các bản `Log backup` và xử lý.  
+```sql
+IF OBJECT_ID('tempdb..#logs_all') IS NOT NULL DROP TABLE #logs_all;
+CREATE TABLE #logs_all
+(
+    backup_set_id        int,
+    media_set_id         int,
+    database_name        sysname,
+    [type]               char(1),
+    is_copy_only         bit,
+    backup_start_date    datetime,
+    backup_finish_date   datetime,
+    first_lsn            numeric(25,0),
+    last_lsn             numeric(25,0),
+    database_backup_lsn  numeric(25,0)
+);
+```
+Sau đó lấy các bản ghi của `Log backup` và dhi vào bảng tạm `#logs_all`. Đảm bảo chỉ lấy các `Log backup` sau `Full/Diff` nối tiếp, không lấy các `Log backup` cũ.  
+```sql
+INSERT INTO #logs_all (backup_set_id, media_set_id, database_name, [type], is_copy_only,
+                       backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn)
+SELECT backup_set_id, media_set_id, database_name, [type], is_copy_only,
+       backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
+FROM msdb.dbo.backupset
+WHERE database_name = @SourceDb
+    AND [type] = 'L'                          -- LOG
+    AND last_lsn > @StartLsn                 -- sau FULL/DIFF
+ORDER BY backup_finish_date ASC;
+```
+Tương tự tạo 1 bảng `#logs_sel` để chứa các bản `Log backup` trước thời điểm ta cần khôi phục lại.  
+
+```sql
+IF OBJECT_ID('tempdb..#logs_sel') IS NOT NULL DROP TABLE #logs_sel;
+CREATE TABLE #logs_sel
+(
+    backup_set_id        int,
+    media_set_id         int,
+    database_name        sysname,
+    [type]               char(1),
+    is_copy_only         bit,
+    backup_start_date    datetime,
+    backup_finish_date   datetime,
+    first_lsn            numeric(25,0),
+    last_lsn             numeric(25,0),
+    database_backup_lsn  numeric(25,0)
+);
+
+INSERT INTO #logs_sel (backup_set_id, media_set_id, database_name, [type], is_copy_only,
+                       backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn)
+SELECT backup_set_id, media_set_id, database_name, [type], is_copy_only,
+       backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
+FROM #logs_all
+WHERE backup_finish_date < @StopAt
+ORDER BY backup_finish_date ASC;
+```
+Sau đó ta tìm 1 bản `Log backup` đầu tiên mà thời gian kết thúc sau thời điểm khôi phục `10:23:00 17/09/2025`, có nghĩa là `Log backup` này bao phủ thời điểm cần khôi phục gần nhất.  
+Nếu tồn tại tệp đấy thì ta sử dụng nó cho mệnh đề `STOPAT` trên file `Log backup` cuối cùng.  
+
+```sql
+IF @finalLogId IS NOT NULL
+BEGIN
+    INSERT INTO #logs_sel (backup_set_id, media_set_id, database_name, [type], is_copy_only,
+                            backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn)
+    SELECT backup_set_id, media_set_id, database_name, [type], is_copy_only,
+            backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
+    FROM #logs_all
+    WHERE backup_set_id = @finalLogId;
+END
+```
+Nếu có `@finalLogId` → chèn riêng bản log đó vào bảng `#logs_sel`  
+Kết quả `#logs_sel` giờ chứa: Tất cả log hoàn toàn trước `StopAt` + 1 bản log đầu tiên bao phủ `StopAt (nếu có)`.  
+Khi restore sẽ apply các log trong `#logs_sel` theo thứ tự; file cuối cùng có thể dùng `STOPAT = @StopAt` nếu nó là file có `backup_finish_date >= @StopAt`.  
+
+Sau đó ta tiến hành lấy các đường dẫn `log`, `data` để phục vụ cho lệnh `MOVE`.
+
+```sql
+IF OBJECT_ID('tempdb..#bf') IS NOT NULL DROP TABLE #bf;
+SELECT
+    bf.logical_name,
+    bf.physical_name,
+    bf.file_type,        -- 'D' (data) / 'L' (log)
+    bf.file_number       -- <-- dùng file_number để sắp thứ tự (FIX)
+INTO #bf
+FROM msdb.dbo.backupfile bf
+JOIN #base b ON bf.backup_set_id = b.backup_set_id;
+```
+Bảng `backupfile` lưu danh sách file bên trong DB tại thời điểm backup FULL: mỗi dòng là một logical file (data/log), kèm physical_name cũ.  
+Ta dùng nó để sinh `MOVE` tương ứng từng file khi restore.  
+
+![alt text](Image/get_physical_device_name_full_backup_for_move.png)  
+
+Ta dùng 2 đường dẫn này phục vụ cho lệnh `MOVE` khi khôi phục dữ liệu sang 1 `Database mới`.  
+Khi đã có đường dẫn để phục vụ lệnh `MOVE`, ta đánh số tệp theo từng loại và quyết định tên/ đích mới.  
+
+```sql
+IF OBJECT_ID('tempdb..#bf2') IS NOT NULL DROP TABLE #bf2;
+;WITH x AS (
+    SELECT *,
+            ROW_NUMBER() OVER (PARTITION BY file_type ORDER BY file_number) AS rn
+    FROM #bf
+)
+SELECT
+    logical_name,
+    file_type, rn,
+    physical_name,
+    CASE
+        WHEN RIGHT(LOWER(physical_name), 4) IN ('.mdf', '.ndf', '.ldf')
+        THEN RIGHT(physical_name, 4)
+        ELSE CASE WHEN file_type='L' THEN '.ldf' ELSE CASE WHEN rn=1 THEN '.mdf' ELSE '.ndf' END END
+    END AS ext,
+    CASE WHEN @Relocate = 1 THEN
+        CASE WHEN file_type='L'
+            THEN @LogPath  + @TargetDb + CASE WHEN rn=1 THEN '_log' ELSE '_log' + CAST(rn AS varchar(10)) END
+            ELSE @DataPath + @TargetDb + CASE WHEN rn=1 THEN ''     ELSE '_' + CAST(rn AS varchar(10)) END
+        END
+        ELSE physical_name
+    END AS dest_base
+INTO #bf2
+FROM x;
+
+```
+
+Câu lệnh hoàn chỉnh tự động hóa khôi phục dữ liệu như sau.  
+```sql
+SET NOCOUNT ON;
+
+------------------------ CẤU HÌNH ------------------------
+DECLARE @SourceDb     sysname      = N'Docker_DB';              -- DB nguồn
+DECLARE @TargetDb     sysname      = N'Docker_DB_Restore';      -- DB đích
+DECLARE @StopAt       datetime     = '2025-09-17T08:16:00';     -- Mốc thời gian (NULL = mới nhất)
+DECLARE @Overwrite    bit          = 0;                         -- 1 = WITH REPLACE (ghi đè)
+DECLARE @DryRun       bit          = 1;                         -- 1 = chỉ IN; 0 = THỰC THI
+DECLARE @UseChecksum  bit          = 1;                         -- RESTORE WITH CHECKSUM
+DECLARE @UseStats     int          = 5;                         -- STATS = n
+DECLARE @Relocate     bit          = 1;                         -- 1 = MOVE sang thư mục mới
+DECLARE @DataPath     nvarchar(260)= N'D:\SQL_Data\';           -- Thư mục .mdf/.ndf (khi @Relocate=1)
+DECLARE @LogPath      nvarchar(260)= N'E:\SQL_Log\';            -- Thư mục .ldf (khi @Relocate=1)
+---------------------------------------------------------
+
+IF @StopAt IS NULL SET @StopAt = '9999-12-31';
+
+-- Kiểm tra có lịch sử backup
+IF NOT EXISTS (SELECT 1 FROM msdb.dbo.backupset WHERE database_name = @SourceDb)
+BEGIN
+    RAISERROR(N'Không thấy lịch sử backup của %s trong msdb.', 16, 1, @SourceDb);
+    RETURN;
+END;
+
+-- 1) FULL base (non COPY_ONLY) trước/bằng @StopAt
+IF OBJECT_ID('tempdb..#base') IS NOT NULL DROP TABLE #base;
+SELECT TOP (1) *
+INTO #base
+FROM msdb.dbo.backupset
+WHERE database_name = @SourceDb
+    AND type = 'D'                -- FULL
+    AND is_copy_only = 0
+    AND backup_finish_date <= @StopAt
+ORDER BY backup_finish_date DESC;
+
+IF NOT EXISTS (SELECT 1 FROM #base)
+BEGIN
+    RAISERROR(N'Không tìm thấy FULL (không COPY_ONLY) trước/bằng @StopAt.', 16, 1);
+    RETURN;
+END;
+
+-- 2) Striping của FULL base
+IF OBJECT_ID('tempdb..#base_files') IS NOT NULL DROP TABLE #base_files;
+SELECT bmf.physical_device_name, bmf.family_sequence_number
+INTO #base_files
+FROM msdb.dbo.backupmediafamily bmf
+JOIN #base b ON bmf.media_set_id = b.media_set_id
+ORDER BY bmf.family_sequence_number;
+
+-- 3) DIFF khớp base (trước/bằng @StopAt)
+IF OBJECT_ID('tempdb..#diff') IS NOT NULL DROP TABLE #diff;
+WITH d AS (
+    SELECT TOP (1) *
+    FROM msdb.dbo.backupset
+    WHERE database_name = @SourceDb
+        AND type = 'I'              -- DIFF
+        AND backup_finish_date <= @StopAt
+        AND database_backup_lsn = (SELECT first_lsn FROM #base)
+    ORDER BY backup_finish_date DESC
+)
+SELECT * INTO #diff FROM d;
+
+IF OBJECT_ID('tempdb..#diff_files') IS NOT NULL DROP TABLE #diff_files;
+IF EXISTS (SELECT 1 FROM #diff)
+BEGIN
+    SELECT bmf.physical_device_name, bmf.family_sequence_number
+    INTO #diff_files
+    FROM msdb.dbo.backupmediafamily bmf
+    JOIN #diff d ON bmf.media_set_id = d.media_set_id
+    ORDER BY bmf.family_sequence_number;
+END;
+
+-- 4) LOGs nối tiếp tới/bao trùm @StopAt
+DECLARE @StartLsn numeric(25,0) =
+    COALESCE( (SELECT last_lsn FROM #diff), (SELECT last_lsn FROM #base) );
+
+-- Tạo bảng tạm KHÔNG có IDENTITY
+IF OBJECT_ID('tempdb..#logs_all') IS NOT NULL DROP TABLE #logs_all;
+CREATE TABLE #logs_all
+(
+    backup_set_id        int,
+    media_set_id         int,
+    database_name        sysname,
+    [type]               char(1),
+    is_copy_only         bit,
+    backup_start_date    datetime,
+    backup_finish_date   datetime,
+    first_lsn            numeric(25,0),
+    last_lsn             numeric(25,0),
+    database_backup_lsn  numeric(25,0)
+);
+
+INSERT INTO #logs_all (backup_set_id, media_set_id, database_name, [type], is_copy_only,
+                       backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn)
+SELECT backup_set_id, media_set_id, database_name, [type], is_copy_only,
+       backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
+FROM msdb.dbo.backupset
+WHERE database_name = @SourceDb
+    AND [type] = 'L'                          -- LOG
+    AND last_lsn > @StartLsn                 -- sau FULL/DIFF
+ORDER BY backup_finish_date ASC;
+
+-- LOGs trước @StopAt
+IF OBJECT_ID('tempdb..#logs_sel') IS NOT NULL DROP TABLE #logs_sel;
+CREATE TABLE #logs_sel
+(
+    backup_set_id        int,
+    media_set_id         int,
+    database_name        sysname,
+    [type]               char(1),
+    is_copy_only         bit,
+    backup_start_date    datetime,
+    backup_finish_date   datetime,
+    first_lsn            numeric(25,0),
+    last_lsn             numeric(25,0),
+    database_backup_lsn  numeric(25,0)
+);
+
+INSERT INTO #logs_sel (backup_set_id, media_set_id, database_name, [type], is_copy_only,
+                       backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn)
+SELECT backup_set_id, media_set_id, database_name, [type], is_copy_only,
+        backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
+FROM #logs_all
+WHERE backup_finish_date < @StopAt
+ORDER BY backup_finish_date ASC;
+
+-- Ứng viên LOG đầu tiên mà finish >= @StopAt (nếu có)
+DECLARE @finalLogId int =
+(
+    SELECT TOP (1) backup_set_id
+    FROM #logs_all
+    WHERE backup_finish_date >= @StopAt
+    ORDER BY backup_finish_date ASC
+);
+
+IF @finalLogId IS NOT NULL
+BEGIN
+    INSERT INTO #logs_sel (backup_set_id, media_set_id, database_name, [type], is_copy_only,
+                            backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn)
+    SELECT backup_set_id, media_set_id, database_name, [type], is_copy_only,
+            backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
+    FROM #logs_all
+    WHERE backup_set_id = @finalLogId;
+END
+
+-- 5) MOVE list từ msdb.dbo.backupfile (của FULL base)
+IF OBJECT_ID('tempdb..#bf') IS NOT NULL DROP TABLE #bf;
+SELECT
+    bf.logical_name,
+    bf.physical_name,
+    bf.file_type,        -- 'D' (data) / 'L' (log)
+    bf.file_number
+INTO #bf
+FROM msdb.dbo.backupfile bf
+JOIN #base b ON bf.backup_set_id = b.backup_set_id;
+
+IF OBJECT_ID('tempdb..#bf2') IS NOT NULL DROP TABLE #bf2;
+;WITH x AS (
+    SELECT *,
+            ROW_NUMBER() OVER (PARTITION BY file_type ORDER BY file_number) AS rn
+    FROM #bf
+)
+SELECT
+    logical_name,
+    file_type, rn,
+    physical_name,
+    CASE
+        WHEN RIGHT(LOWER(physical_name), 4) IN ('.mdf', '.ndf', '.ldf')
+        THEN RIGHT(physical_name, 4)
+        ELSE CASE WHEN file_type='L' THEN '.ldf' ELSE CASE WHEN rn=1 THEN '.mdf' ELSE '.ndf' END END
+    END AS ext,
+    CASE WHEN @Relocate = 1 THEN
+        CASE WHEN file_type='L'
+            THEN @LogPath  + @TargetDb + CASE WHEN rn=1 THEN '_log' ELSE '_log' + CAST(rn AS varchar(10)) END
+            ELSE @DataPath + @TargetDb + CASE WHEN rn=1 THEN ''     ELSE '_' + CAST(rn AS varchar(10)) END
+        END
+        ELSE physical_name
+    END AS dest_base
+INTO #bf2
+FROM x;
+
+DECLARE @MoveClause nvarchar(max) =
+    STUFF((
+        SELECT
+        N', MOVE N''' + logical_name + N''' TO N''' +
+        REPLACE(dest_base, '''', '''''') + ext + N''''
+        FROM #bf2
+        ORDER BY (CASE WHEN file_type='D' THEN 0 ELSE 1 END), rn
+        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+
+-- 6) FROM DISK cho FULL/DIFF
+DECLARE @FromBase nvarchar(max) =
+    STUFF((
+        SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
+        FROM #base_files
+        ORDER BY family_sequence_number
+        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+
+DECLARE @FromDiff nvarchar(max) = NULL;
+IF EXISTS (SELECT 1 FROM #diff)
+BEGIN
+    SET @FromDiff =
+        STUFF((
+        SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
+        FROM #diff_files
+        ORDER BY family_sequence_number
+        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+END;
+
+-- 7) Lắp chuỗi RESTORE
+DECLARE @sql nvarchar(max) = N'';
+DECLARE @optsCommon nvarchar(200) =
+    N'WITH ' +
+    CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
+    N'STATS = ' + CAST(@UseStats AS nvarchar(10)) + N', ';
+
+-- FULL
+SET @sql += N'-- RESTORE FULL' + CHAR(13) +
+    N'RESTORE DATABASE ['+@TargetDb+'] FROM ' + @FromBase + CHAR(13) +
+    @optsCommon +
+    CASE WHEN @Overwrite=1 THEN N'REPLACE, ' ELSE N'' END +
+    N'NORECOVERY' + @MoveClause + N';' + CHAR(13) + CHAR(13);
+
+-- DIFF (nếu có)
+IF @FromDiff IS NOT NULL
+    SET @sql += N'-- RESTORE DIFF' + CHAR(13) +
+        N'RESTORE DATABASE ['+@TargetDb+'] FROM ' + @FromDiff + CHAR(13) +
+        @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
+
+-- LOGs: tất cả NORECOVERY, file cuối RECOVERY (+ STOPAT nếu có @finalLogId)
+DECLARE @n int = (SELECT COUNT(*) FROM #logs_sel);
+IF @n > 0
+BEGIN
+    DECLARE @i int = 0;
+    DECLARE @media_set_id int, @fromLog nvarchar(max);
+    DECLARE @thisIsFinal bit;
+    DECLARE @finalLogId_local int = @finalLogId;   -- tránh dùng biến ngoài trong cursor
+
+    DECLARE cur CURSOR LOCAL FAST_FORWARD FOR
+        SELECT media_set_id,
+            CASE WHEN backup_set_id = ISNULL(@finalLogId_local, -1) THEN 1 ELSE 0 END AS is_final
+        FROM #logs_sel
+        ORDER BY backup_finish_date ASC;
+
+    OPEN cur; FETCH NEXT FROM cur INTO @media_set_id, @thisIsFinal;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @fromLog =
+        STUFF((
+            SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
+            FROM msdb.dbo.backupmediafamily
+            WHERE media_set_id = @media_set_id
+            ORDER BY family_sequence_number
+            FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+
+        IF @thisIsFinal = 1
+        SET @sql += N'RESTORE LOG ['+@TargetDb+'] FROM ' + @fromLog + CHAR(13) +
+                    N'WITH ' +
+                    CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
+                    N'STATS = ' + CAST(@UseStats AS nvarchar(10)) +
+                    CASE WHEN @finalLogId IS NOT NULL
+                        THEN N', STOPAT = ''' + CONVERT(nvarchar(23), @StopAt, 121) + N''', RECOVERY'
+                        ELSE N', RECOVERY' END +
+                    N';' + CHAR(13) + CHAR(13);
+        ELSE
+        SET @sql += N'RESTORE LOG ['+@TargetDb+'] FROM ' + @fromLog + CHAR(13) +
+                    @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
+
+        FETCH NEXT FROM cur INTO @media_set_id, @thisIsFinal;
+    END
+    CLOSE cur; DEALLOCATE cur;
+END
+ELSE
+BEGIN
+    -- Không có LOG bao trùm/đến @StopAt → kết thúc tại DIFF/FULL hiện có
+    SET @sql += N'-- No LOG backup covers @StopAt → recover database at last applied set' + CHAR(13) +
+                N'RESTORE DATABASE ['+@TargetDb+'] WITH RECOVERY;' + CHAR(13) + CHAR(13);
+END
+
+-- Tóm tắt (không subquery trong PRINT)
+DECLARE @BaseFinish nvarchar(30), @DiffFinish nvarchar(30) = NULL, @LogCount int;
+SELECT @BaseFinish = CONVERT(nvarchar(30), backup_finish_date, 121) FROM #base;
+IF EXISTS (SELECT 1 FROM #diff)
+    SELECT @DiffFinish = CONVERT(nvarchar(30), backup_finish_date, 121) FROM #diff;
+SELECT @LogCount = COUNT(*) FROM #logs_sel;
+
+PRINT '--- SUMMARY -------------------------------------------';
+PRINT 'Base FULL: ' + ISNULL(@BaseFinish,'(none)');
+PRINT 'DIFF     : ' + ISNULL(@DiffFinish,'(none)');
+PRINT 'LOG count: ' + CAST(@LogCount AS nvarchar(10));
+PRINT 'Target DB: ' + @TargetDb;
+PRINT 'Relocate : ' + CAST(@Relocate AS nvarchar(10));
+PRINT 'Overwrite: ' + CAST(@Overwrite AS nvarchar(10));
+PRINT 'DryRun   : ' + CAST(@DryRun   AS nvarchar(10));
+PRINT '-------------------------------------------------------';
+
+IF @DryRun = 1
+BEGIN
+    PRINT @sql;              -- kiểm tra trước
+END
+ELSE
+BEGIN
+    EXEC sp_executesql @sql; -- thực thi
+END
+
+```
 ### 4.1 SQL Server Agent Jobs (phổ biến nhất)
 Tạo 3 jobs: FULL, DIFF, LOG với T-SQL trên.  
 
