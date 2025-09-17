@@ -1288,8 +1288,208 @@ SELECT
     END AS dest_base
 INTO #bf2
 FROM x;
-
 ```
+`ROW_NUMBER() OVER (PARTITION BY file_type ORDER BY file_number)`: Đánh số `rn` bắt đầu từ 1 riêng cho data và riêng cho log. Giúp ta biết đâu là data đầu tiên (rn=1) để đặt đuôi .mdf, những data kế tiếp .ndf.  
+
+Tiếp theo ta tính ext (đuôi file):  
+Nếu `physical_name` đã có `.mdf/.ndf/.ldf` thì ta giữ nguyên. Nếu khác với 4 định dạng trên, gán mặc định: `data rn=1 → .mdf`, `data rn>1 → .ndf`, `log → .ldf`.  
+
+Tính dest_base (đường dẫn + tên chưa có đuôi):  
+Nếu `@Relocate = 1` → đưa file về thư mục mới (có nghĩa là khôi phục DB vào 1 bản Database mới):  
+`Data: @DataPath + @TargetDb (file 1), @DataPath + @TargetDb_2 (file 2), …`  
+`Log: @LogPath + @TargetDb_log (log 1), @TargetDb_log2 (log 2), …`  
+
+Nếu `@Relocate = 0` → giữ nguyên physical_name (phục hồi đúng chỗ cũ).  
+Ví dụ ta có bảng `#bf2` như sau (với `@Relocate = 1`, `@TargetDb = YourDB_Clone`):  
+logical_name	file_type	rn	physical_name	ext	dest_base
+YourDB	D	1	D:\SQL_Data\YourDB.mdf	.mdf	D:\SQL_Data\YourDB_Clone
+FG_Sales_01	D	2	D:\SQL_Data\YourDB_Sales01.ndf	.ndf	D:\SQL_Data\YourDB_Clone_2
+YourDB_log	L	1	E:\SQL_Log\YourDB_log.ldf	.ldf	E:\SQL_Log\YourDB_Clone_log
+
+> Sau đó ta sẽ nối dest_base + ext thành đích cuối (ví dụ D:\SQL_Data\YourDB_Clone.mdf).  
+
+Cuối cùng nối chuỗi vào lệnh `MOVE`:  
+```sql
+DECLARE @MoveClause nvarchar(max) =
+    STUFF((
+        SELECT
+        N', MOVE N''' + logical_name + N''' TO N''' +
+        REPLACE(dest_base, '''', '''''') + ext + N''''
+        FROM #bf2
+        ORDER BY (CASE WHEN file_type='D' THEN 0 ELSE 1 END), rn
+        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+```
+Duyệt `#bf2` theo thứ tự: `data` trước, rồi `log (ORDER BY (file_type), rn)`. Mỗi dòng tạo một mảnh `MOVE N'<logical>' TO N'<đường_dẫn_mới>'`.  
+
+`FOR XML PATH('') + STUFF(...)` là “mẹo” nối chuỗi thành một đoạn lớn. `FOR XML PATH('')` gộp mọi mảnh lại thành một chuỗi XML/text. `STUFF(..., 1, 2, '')` bỏ 2 ký tự mở đầu (, ) thừa. `REPLACE(..., '''', '''''')` nhân đôi dấu ' nếu đường dẫn có dấu nháy đơn—tránh lỗi cú pháp.  
+Kết quả cuối cùng cho `@MoveClause` như sau:  
+```sql
+MOVE N'YourDB' TO N'D:\SQL_Data\YourDB_Clone.mdf',
+MOVE N'FG_Sales_01' TO N'D:\SQL_Data\YourDB_Clone_2.ndf',
+MOVE N'YourDB_log' TO N'E:\SQL_Log\YourDB_Clone_log.ldf'
+```
+
+Tiếp theo ta sẽ gom các lệnh cho `Full backup` từ các tệp ở bảng `#base_files`:  
+
+```sql
+DECLARE @FromBase nvarchar(max) =
+    STUFF((
+        SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
+        FROM #base_files
+        ORDER BY family_sequence_number
+        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+```
+Để rồi ta có chuỗi `@FromBase` lần lượt chứa các tệp backup như sau:  
+```sql
+DISK = N'E:\...\FULL_xxx_1.bak',
+DISK = N'F:\...\FULL_xxx_2.bak',
+...
+```
+Tiếp tục tạo chuỗi cho Cá `Diff backup` nếu nó tồn tại, và đuọc lấy từ bảng `#diff_files`. Nếu bảng này trống thì `@fromDiff = Null`, sau này gọi lệnh nó sẽ bỏ qua  
+```sql
+DECLARE @FromDiff nvarchar(max) = NULL;
+IF EXISTS (SELECT 1 FROM #diff)
+BEGIN
+    SET @FromDiff =
+        STUFF((
+        SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
+        FROM #diff_files
+        ORDER BY family_sequence_number
+        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+END;
+```
+
+Sau đó tạo chuỗi kết thúc chung cho mỗi câu lệnh `RESTORE`:  
+```sql
+DECLARE @sql nvarchar(max) = N'';
+DECLARE @optsCommon nvarchar(200) =
+    N'WITH ' +
+    CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
+    N'STATS = ' + CAST(@UseStats AS nvarchar(10)) + N', ';
+```
+Kết hợp các tuỳ chọn dùng lại nhiều lần:  
+- `WITH CHECKSUM` (nếu bật)
+- `STATS = n` (báo tiến độ)
+
+Sau này ghép thêm `REPLACE`, `NORECOVERY` hoặc `RECOVERY`, `STOPAT` tùy từng lệnh.  
+
+Hoàn thành ghép nối cho câu lệnh `Full` và `Diff` thì ta chạy 2 lệnh này trước.  
+Đối với lệnh `Full` thì luôn chạy là `NORECOVERY` để chạy thêm các tệp `Diff` và `Log`.  
+```sql
+SET @sql += N'-- RESTORE FULL' + CHAR(13) +
+    N'RESTORE DATABASE ['+@TargetDb+'] FROM ' + @FromBase + CHAR(13) +
+    @optsCommon +
+    CASE WHEN @Overwrite=1 THEN N'REPLACE, ' ELSE N'' END +
+    N'NORECOVERY' + @MoveClause + N';' + CHAR(13) + CHAR(13);
+```
+`REPLACE`: chỉ có khi `@Overwrite=1`, dùng khi bạn đè `DB đích đã tồn tại`.  
+
+Câu lệnh tên sẽ sinh ra mẫu lệnh như sau:  
+```sql
+RESTORE DATABASE [TargetDb]
+FROM DISK='...' , DISK='...' , ...
+WITH CHECKSUM, STATS=5, [REPLACE,] NORECOVERY, 
+    MOVE N'...' TO N'...', MOVE N'...' TO N'...';
+```
+Ví dụ cho 1 câu lệnh hoàn chỉnh cần phải sinh ra khi chạy lệnh trên như sau:  
+```sql
+RESTORE DATABASE [YourDB_Clone] FROM
+    DISK = N'E:\...\FULL_..._1.bak', DISK = N'F:\...\FULL_..._2.bak', ...
+WITH CHECKSUM, STATS = 5, NORECOVERY,
+    MOVE N'YourDB' TO N'D:\SQL_Data\YourDB_Clone.mdf',
+    MOVE N'FG_Sales_01' TO N'D:\SQL_Data\YourDB_Clone_2.ndf',
+    MOVE N'YourDB_log' TO N'E:\SQL_Log\YourDB_Clone_log.ldf';
+```
+Tương tự ta chạy bản `Diff` với tham số `NORECOVERY`.  
+```sql
+IF @FromDiff IS NOT NULL
+    SET @sql += N'-- RESTORE DIFF' + CHAR(13) +
+        N'RESTORE DATABASE ['+@TargetDb+'] FROM ' + @FromDiff + CHAR(13) +
+        @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
+```
+Câu lệnh mẫu sẽ như sau:  
+```sql
+RESTORE DATABASE [YourDB_Clone]
+FROM DISK = N'E:\...\DIFF_..._1.bak', DISK = N'F:\...\DIFF_..._2.bak', ...
+WITH CHECKSUM, STATS = 5, NORECOVERY;
+``` 
+
+Cuối cùng là các bản `Log`.  
+
+```sql
+DECLARE @n int = (SELECT COUNT(*) FROM #logs_sel);
+IF @n > 0
+BEGIN
+    DECLARE @i int = 0;
+    DECLARE @media_set_id int, @fromLog nvarchar(max);
+    DECLARE @thisIsFinal bit;
+    DECLARE @finalLogId_local int = @finalLogId;
+
+    DECLARE cur CURSOR LOCAL FAST_FORWARD FOR
+        SELECT media_set_id,
+            CASE WHEN backup_set_id = ISNULL(@finalLogId_local, -1) THEN 1 ELSE 0 END AS is_final
+        FROM #logs_sel
+        ORDER BY backup_finish_date ASC;
+
+    OPEN cur; FETCH NEXT FROM cur INTO @media_set_id, @thisIsFinal;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @fromLog =
+        STUFF((
+            SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
+            FROM msdb.dbo.backupmediafamily
+            WHERE media_set_id = @media_set_id
+            ORDER BY family_sequence_number
+            FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+
+        IF @thisIsFinal = 1
+        SET @sql += N'RESTORE LOG ['+@TargetDb+'] FROM ' + @fromLog + CHAR(13) +
+                    N'WITH ' +
+                    CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
+                    N'STATS = ' + CAST(@UseStats AS nvarchar(10)) +
+                    CASE WHEN @finalLogId IS NOT NULL
+                        THEN N', STOPAT = ''' + CONVERT(nvarchar(23), @StopAt, 121) + N''', RECOVERY'
+                        ELSE N', RECOVERY' END +
+                    N';' + CHAR(13) + CHAR(13);
+        ELSE
+        SET @sql += N'RESTORE LOG ['+@TargetDb+'] FROM ' + @fromLog + CHAR(13) +
+                    @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
+
+        FETCH NEXT FROM cur INTO @media_set_id, @thisIsFinal;
+    END
+    CLOSE cur; DEALLOCATE cur;
+END
+ELSE
+BEGIN
+    SET @sql += N'-- No LOG backup covers @StopAt → recover database at last applied set' + CHAR(13) +
+                N'RESTORE DATABASE ['+@TargetDb+'] WITH RECOVERY;' + CHAR(13) + CHAR(13);
+END
+```
+
+`#logs_sel` là danh sách LOG cần áp theo logic “10:25” (đã chọn ở bước trước script):
+
+Lấy mọi LOG kết thúc trước `@StopAt` → áp với `NORECOVERY`. Nếu có một `LOG` có `backup_finish_date >= @StopAt` → chèn thêm `LOG` đầu tiên đó làm file cuối, lệnh cuối sẽ có `STOPAT = @StopAt + RECOVERY`. Vì mỗi `LOG backup` cũng có thể `striped`, nên ta phải gom list `DISK = '...'` theo media_set_id từng LOG (đúng thứ tự `family_sequence_number`).  
+
+`@thisIsFinal` báo LOG cuối trong chuỗi (bao trùm` @StopAt`)—chỉ `LOG` cuối có `RECOVERY (và có STOPAT nếu cần)`. Nếu không có LOG nào bao trùm được `@StopAt` → khôi phục tới bản cuối cùng trước `@StopAt` và `RECOVERY` luôn (không `STOPAT`).  
+
+Ví dụ 1 (có LOG 10:30 → dừng 10:25):  
+`Log backups: 10:00–10:15, 10:15–10:30, 10:30–10:45 …`
+
+`@StopAt = 10:25` ⇒ `#logs_sel = {log 10:00–10:15, log 10:15–10:30}`.
+
+`10:00–10:15: RESTORE LOG ... WITH NORECOVERY`
+
+`10:15–10:30: RESTORE LOG ... WITH STOPAT='2025-09-16T10:25:00', RECOVERY`
+
+Ví dụ 2 (không có LOG ≥ 10:25 → dừng 10:15):  
+
+Log backups chỉ đến 10:15.  
+`#logs_sel = {log 10:00–10:15}.` 10:00–10:15 là cuối và không có` @finalLogId` ⇒` RESTORE LOG ... WITH RECOVERY (không STOPAT)`, chấp nhận mất 10’.  
+
+
+
+
+
 
 Câu lệnh hoàn chỉnh tự động hóa khôi phục dữ liệu như sau.  
 ```sql
