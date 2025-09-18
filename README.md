@@ -665,6 +665,11 @@ Bản copy này là độc lập, ko ảnh hưởng đến việc sao lưu cho d
 Đối với `Differential` được sao lưu hằng ngày, nó chỉ sao lưu những dữ liệu mà có sự thay đổi so với bản `Full backup` gần nhất (không có thuộc tính `COPY_ONLY`).  
 Vì vậy ta luôn phải tạo 1 `Backup full` trước khi backup các kiểu còn lại  
 
+> Diff backup ngày thứ 2 sẽ chứa các thay đổi ngày chủ nhật  
+> Diff backup ngày thứ 3 sẽ chứa các thay đổi ngày chủ nhật, ngày thứ 2 (bao gồm các thay đổi trước đó cho đến Full backup gần nhất)  
+> Diff backup ngày thứ 4 sẽ chứa các thay đổi ngày chủ nhật, ngày thứ 2, 3 (bao gồm các thay đổi trước đó cho đến Full backup gần nhất)  
+
+
 ```sql
 BACKUP DATABASE [YourDB]
 TO DISK = N'E:\SQL_Backup\MyYourDBDB\YourDB_DIFF_20250916_060000.bak'
@@ -975,6 +980,7 @@ WITH NORECOVERY, CHECKSUM, STATS = 5;
 
 > Nếu thời điểm cần khôi phục trùng với bản Diff backup hay chỉ muốn dừng ở bản Diff backup thì thay tham số `NORECOVERY` thành `RECOVERY`  
 > Nếu không có các Diff backup thì có thể bỏ qua, nhảy luôn xuống Log backup (sẽ lâu hơn, nhiều file hơn)  
+> Chỉ cần khôi phục 1 bản Diff backup gần nhất với thời điểm khôi phục
 
 #### 4.3 Khôi phục các bản Log gần nhất
 Các bản `Log backup` được sao lưu cách nhau 15 phút hằng ngày bắt đầu từ `00:45:00` (00:30 đã có bản Diff).  
@@ -1493,48 +1499,65 @@ Log backups chỉ đến 10:15.
 
 Câu lệnh hoàn chỉnh tự động hóa khôi phục dữ liệu như sau.  
 ```sql
+/* ================================================================
+   AUTO RESTORE 
+   - FULL base (non COPY_ONLY) → DIFF khớp → LOGs tới/bao trùm @StopAt
+   - Nếu KHÔNG có log finish >= @StopAt: áp các log trước @StopAt,
+     và log cuối RECOVERY (không STOPAT)
+   - @TailLogFile: nếu đặt và ghi đè DB gốc, chèn RESTORE LOG từ tail
+     ở cuối chuỗi (các bước trước đó NORECOVERY)
+   - Tùy chọn SINGLE_USER/MULTI_USER & KILL session khi ghi đè DB gốc
+   - Full backup vào 0:00:00 chủ nhật hằng tuần
+   - Diff backup vào 0:30 hằng ngày (trừ chủ nhật)
+   - Log backup vào 0:45 hằng ngày và mỗi 15 phút
+   ================================================================ */
+
 SET NOCOUNT ON;
 
 ------------------------ CẤU HÌNH ------------------------
-DECLARE @SourceDb     sysname      = N'Docker_DB';              -- DB nguồn
-DECLARE @TargetDb     sysname      = N'Docker_DB_Restore';      -- DB đích
-DECLARE @StopAt       datetime     = '2025-09-17T08:16:00';     -- Mốc thời gian (NULL = mới nhất)
-DECLARE @Overwrite    bit          = 0;                         -- 1 = WITH REPLACE (ghi đè)
-DECLARE @DryRun       bit          = 1;                         -- 1 = chỉ IN; 0 = THỰC THI
-DECLARE @UseChecksum  bit          = 1;                         -- RESTORE WITH CHECKSUM
-DECLARE @UseStats     int          = 5;                         -- STATS = n
-DECLARE @Relocate     bit          = 1;                         -- 1 = MOVE sang thư mục mới
-DECLARE @DataPath     nvarchar(260)= N'D:\SQL_Data\';           -- Thư mục .mdf/.ndf (khi @Relocate=1)
-DECLARE @LogPath      nvarchar(260)= N'E:\SQL_Log\';            -- Thư mục .ldf (khi @Relocate=1)
+DECLARE @SourceDb       sysname       = N'Docker_DB';              -- DB nguồn, có các bản sao lưu
+DECLARE @TargetDb       sysname       = N'Docker_DB';      -- DB đích cần khôi phục, nếu để trùng tên thì ghi đè DB, khác tên thì tạo DB mới
+DECLARE @StopAt         datetime      = '2025-09-18T08:06:00';     -- Mốc thời gian khôi phục dữ liệu (NULL = mới nhất)
+DECLARE @Overwrite      bit           = 1;                         -- 1 = WITH REPLACE (ghi đè DB đích khi đặt DB đích cùng tên DB cũ)
+DECLARE @DryRun         bit           = 1;                         -- 1 = chỉ IN CÂU LỆNH; 0 = THỰC THI LUÔN CÂU LỆNH
+DECLARE @UseChecksum    bit           = 1;                         -- RESTORE WITH CHECKSUM
+DECLARE @UseStats       int           = 5;                         -- STATS = n
+DECLARE @Relocate       bit           = 0;                         -- 1 = MOVE sang thư mục mới (khi khôi phục dữ liệu sang DB có tên mới)
+DECLARE @DataPath       nvarchar(260) = N'D:\SQL_Data\';           -- Đích .mdf/.ndf (khi @Relocate=1)
+DECLARE @LogPath        nvarchar(260) = N'E:\SQL_Log\';            -- Đích .ldf (khi @Relocate=1)
+
+-- Tính năng bổ sung:
+DECLARE @TailLogFile    nvarchar(4000)= NULL;                      -- Ví dụ: N'E:\SQL_Backup\YourDB\tail\YourDB_TAIL_20250916_230000.trn'
+DECLARE @ManageSingleUser bit         = 1;                         -- 1 = tự SINGLE_USER/MULTI_USER + KILL khi ghi đè DB gốc
 ---------------------------------------------------------
 
 IF @StopAt IS NULL SET @StopAt = '9999-12-31';
 
--- Kiểm tra có lịch sử backup
+-- Kiểm tra msdb có lịch sử backup cho @SourceDb
 IF NOT EXISTS (SELECT 1 FROM msdb.dbo.backupset WHERE database_name = @SourceDb)
 BEGIN
-    RAISERROR(N'Không thấy lịch sử backup của %s trong msdb.', 16, 1, @SourceDb);
-    RETURN;
+  RAISERROR(N'Không thấy lịch sử backup của %s trong msdb.', 16, 1, @SourceDb);
+  RETURN;
 END;
 
--- 1) FULL base (non COPY_ONLY) trước/bằng @StopAt
+-- 1)Tìm  FULL backup (non COPY_ONLY) trước/bằng Thời điểm khôi phục dữ liệu
 IF OBJECT_ID('tempdb..#base') IS NOT NULL DROP TABLE #base;
 SELECT TOP (1) *
 INTO #base
 FROM msdb.dbo.backupset
 WHERE database_name = @SourceDb
-    AND type = 'D'                -- FULL
-    AND is_copy_only = 0
-    AND backup_finish_date <= @StopAt
+  AND type = 'D'               -- FULL
+  AND is_copy_only = 0
+  AND backup_finish_date <= @StopAt
 ORDER BY backup_finish_date DESC;
 
 IF NOT EXISTS (SELECT 1 FROM #base)
 BEGIN
-    RAISERROR(N'Không tìm thấy FULL (không COPY_ONLY) trước/bằng @StopAt.', 16, 1);
-    RETURN;
+  RAISERROR(N'Không tìm thấy FULL backup (không COPY_ONLY) trước/bằng @StopAt.', 16, 1);
+  RETURN;
 END;
 
--- 2) Striping của FULL base
+-- 2) Lấy đường dẫn tới tệp Full backup (nếu stripping thì lấy toàn bộ tệp)
 IF OBJECT_ID('tempdb..#base_files') IS NOT NULL DROP TABLE #base_files;
 SELECT bmf.physical_device_name, bmf.family_sequence_number
 INTO #base_files
@@ -1542,262 +1565,392 @@ FROM msdb.dbo.backupmediafamily bmf
 JOIN #base b ON bmf.media_set_id = b.media_set_id
 ORDER BY bmf.family_sequence_number;
 
--- 3) DIFF khớp base (trước/bằng @StopAt)
+-- 3) DIFF khớp base (trước/bằng @StopAt), chỉ cần 1 diff gần nhất với thời gian khôi phục, vì diff là sự khác nhau so với Full trước đó
 IF OBJECT_ID('tempdb..#diff') IS NOT NULL DROP TABLE #diff;
 WITH d AS (
-    SELECT TOP (1) *
-    FROM msdb.dbo.backupset
-    WHERE database_name = @SourceDb
-        AND type = 'I'              -- DIFF
-        AND backup_finish_date <= @StopAt
-        AND database_backup_lsn = (SELECT first_lsn FROM #base)
-    ORDER BY backup_finish_date DESC
+  SELECT TOP (1) *
+  FROM msdb.dbo.backupset
+  WHERE database_name = @SourceDb
+    AND type = 'I'             -- DIFF
+    AND backup_finish_date <= @StopAt   
+	AND backup_start_date > (SELECT backup_start_date FROM #base)
+    AND differential_base_lsn = (SELECT first_lsn FROM #base)
+  ORDER BY backup_finish_date DESC
 )
-SELECT * INTO #diff FROM d;
+SELECT * 
+INTO #diff 
+FROM d;
 
+-- Lấy đường dẫn tới tệp tin Diff
 IF OBJECT_ID('tempdb..#diff_files') IS NOT NULL DROP TABLE #diff_files;
 IF EXISTS (SELECT 1 FROM #diff)
 BEGIN
-    SELECT bmf.physical_device_name, bmf.family_sequence_number
-    INTO #diff_files
-    FROM msdb.dbo.backupmediafamily bmf
-    JOIN #diff d ON bmf.media_set_id = d.media_set_id
-    ORDER BY bmf.family_sequence_number;
+  SELECT bmf.physical_device_name, bmf.family_sequence_number
+  INTO #diff_files
+  FROM msdb.dbo.backupmediafamily bmf
+  JOIN #diff d ON bmf.media_set_id = d.media_set_id
+  ORDER BY bmf.family_sequence_number;
 END;
 
--- 4) LOGs nối tiếp tới/bao trùm @StopAt
+-- 4) LOGs nối tiếp sau Diff gần nhất (nếu tồn tại diff), hoặc lấy Log sau bản Full gần nhất (khi ko tồn tại bản Diff)
+-- Chuỗi số đánh dấu kết thúc của 1 Diff hoặc Full
 DECLARE @StartLsn numeric(25,0) =
-    COALESCE( (SELECT last_lsn FROM #diff), (SELECT last_lsn FROM #base) );
+  COALESCE( (SELECT TOP(1) last_lsn FROM #diff ORDER BY last_lsn DESC), (SELECT last_lsn FROM #base) );
 
--- Tạo bảng tạm KHÔNG có IDENTITY
+-- Print @StartLsn  -- 40000000269900001
+
+-- Tạo 1 bảng chứa danh sách toàn bộ log backup
 IF OBJECT_ID('tempdb..#logs_all') IS NOT NULL DROP TABLE #logs_all;
 CREATE TABLE #logs_all
 (
-    backup_set_id        int,
-    media_set_id         int,
-    database_name        sysname,
-    [type]               char(1),
-    is_copy_only         bit,
-    backup_start_date    datetime,
-    backup_finish_date   datetime,
-    first_lsn            numeric(25,0),
-    last_lsn             numeric(25,0),
-    database_backup_lsn  numeric(25,0)
+  backup_set_id        int,
+  media_set_id         int,
+  database_name        sysname,
+  [type]               char(1),
+  is_copy_only         bit,
+  backup_start_date    datetime,
+  backup_finish_date   datetime,
+  first_lsn            numeric(25,0),
+  last_lsn             numeric(25,0),
+  database_backup_lsn  numeric(25,0)
 );
 
+-- Lấy tất cả Log backup sau thời điểm bản Diff hoặc Full gần nhất và đưa vào bảng này
 INSERT INTO #logs_all (backup_set_id, media_set_id, database_name, [type], is_copy_only,
                        backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn)
 SELECT backup_set_id, media_set_id, database_name, [type], is_copy_only,
        backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
 FROM msdb.dbo.backupset
-WHERE database_name = @SourceDb
-    AND [type] = 'L'                          -- LOG
-    AND last_lsn > @StartLsn                 -- sau FULL/DIFF
+WHERE database_name = 'Docker_DB'
+  AND [type] = 'L'
+  AND last_lsn > @StartLsn          -- sau FULL/DIFF
 ORDER BY backup_finish_date ASC;
 
--- LOGs trước @StopAt
+-- Chọn các LOG cần áp theo logic @StopAt:
+--  Tạo 1 bảng chứa các log backup trước thời điểm khôi phục dữ liệu
 IF OBJECT_ID('tempdb..#logs_sel') IS NOT NULL DROP TABLE #logs_sel;
 CREATE TABLE #logs_sel
 (
-    backup_set_id        int,
-    media_set_id         int,
-    database_name        sysname,
-    [type]               char(1),
-    is_copy_only         bit,
-    backup_start_date    datetime,
-    backup_finish_date   datetime,
-    first_lsn            numeric(25,0),
-    last_lsn             numeric(25,0),
-    database_backup_lsn  numeric(25,0)
+  backup_set_id        int,
+  media_set_id         int,
+  database_name        sysname,
+  [type]               char(1),
+  is_copy_only         bit,
+  backup_start_date    datetime,
+  backup_finish_date   datetime,
+  first_lsn            numeric(25,0),
+  last_lsn             numeric(25,0),
+  database_backup_lsn  numeric(25,0)
 );
 
+-- Lấy danh sách các bản log backup trước thời điểm khôi phục dữ liệu từ bảng logs_all
 INSERT INTO #logs_sel (backup_set_id, media_set_id, database_name, [type], is_copy_only,
                        backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn)
 SELECT backup_set_id, media_set_id, database_name, [type], is_copy_only,
-        backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
+       backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
 FROM #logs_all
 WHERE backup_finish_date < @StopAt
 ORDER BY backup_finish_date ASC;
 
--- Ứng viên LOG đầu tiên mà finish >= @StopAt (nếu có)
+-- Tiến hành lấy thêm 1 bản log nữa, sau thời điểm khôi phục, nhưng phải ở cùng 1 ngày
+-- Xác định ranh giới ngày của khôi phục
+DECLARE @DayStart      datetime = DATEADD(day, DATEDIFF(day, 0, @StopAt ), 0); -- 00:00:00 ngày đó  @StopAt  
+DECLARE @NextDayStart  datetime = DATEADD(day, 1, @DayStart);                 -- 00:00:00 ngày hôm sau
+
+-- Chọn LOG đầu tiên có thời điểm kết thúc >= @StopAt nhưng PHẢI thuộc NGÀY @StopAt, vì ngày sau đã có bản diff mới rồi
+-- (start >= DayStart và finish < NextDayStart)
 DECLARE @finalLogId int =
 (
-    SELECT TOP (1) backup_set_id
-    FROM #logs_all
-    WHERE backup_finish_date >= @StopAt
-    ORDER BY backup_finish_date ASC
+  SELECT TOP (1) backup_set_id
+  FROM #logs_all
+  WHERE backup_finish_date >= @StopAt  --@StopAt
+    AND backup_start_date   >= @DayStart
+    AND backup_finish_date  <  @NextDayStart
+  ORDER BY backup_finish_date ASC
 );
 
+-- print @finalLogId  --NULL
+
+-- Nếu tồn tại bản log mà chứa thời gian cần khôi phục, thêm nó bảng log_sel
 IF @finalLogId IS NOT NULL
 BEGIN
-    INSERT INTO #logs_sel (backup_set_id, media_set_id, database_name, [type], is_copy_only,
-                            backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn)
-    SELECT backup_set_id, media_set_id, database_name, [type], is_copy_only,
-            backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
-    FROM #logs_all
-    WHERE backup_set_id = @finalLogId;
+  INSERT INTO #logs_sel (backup_set_id, media_set_id, database_name, [type], is_copy_only,
+                         backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn)
+  SELECT backup_set_id, media_set_id, database_name, [type], is_copy_only,
+         backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
+  FROM #logs_all
+  WHERE backup_set_id = @finalLogId;
 END
+
+-- Xác định "log cuối" để đặt tham số RECOVERY:
+-- Đếm số lượng LOG backup tìm được
+DECLARE @hasLogs int = (SELECT COUNT(*) FROM #logs_sel);
+
+-- Lây id của bản Log backup cuối cùng (sắp xếp theo thời gian)
+DECLARE @lastLogId int =
+(
+  SELECT TOP (1) backup_set_id
+  FROM #logs_sel
+  ORDER BY backup_finish_date DESC
+);
+
+-- Nếu có @finalLogId ⇒ final là @finalLogId (RECOVERY + STOPAT)
+-- Nếu KHÔNG có @finalLogId nhưng có log trước @StopAt ⇒ final là @lastLogId (RECOVERY không STOPAT)
 
 -- 5) MOVE list từ msdb.dbo.backupfile (của FULL base)
 IF OBJECT_ID('tempdb..#bf') IS NOT NULL DROP TABLE #bf;
 SELECT
-    bf.logical_name,
-    bf.physical_name,
-    bf.file_type,        -- 'D' (data) / 'L' (log)
-    bf.file_number
+  bf.logical_name,
+  bf.physical_name,
+  bf.file_type,        -- 'D' (data) / 'L' (log)
+  bf.file_number
 INTO #bf
 FROM msdb.dbo.backupfile bf
 JOIN #base b ON bf.backup_set_id = b.backup_set_id;
 
+-- Tạo đường dẫn để dùng cho lệnh MOVE
 IF OBJECT_ID('tempdb..#bf2') IS NOT NULL DROP TABLE #bf2;
 ;WITH x AS (
-    SELECT *,
-            ROW_NUMBER() OVER (PARTITION BY file_type ORDER BY file_number) AS rn
-    FROM #bf
+  SELECT *,
+         ROW_NUMBER() OVER (PARTITION BY file_type ORDER BY file_number) AS rn
+  FROM #bf
 )
 SELECT
-    logical_name,
-    file_type, rn,
-    physical_name,
-    CASE
-        WHEN RIGHT(LOWER(physical_name), 4) IN ('.mdf', '.ndf', '.ldf')
-        THEN RIGHT(physical_name, 4)
-        ELSE CASE WHEN file_type='L' THEN '.ldf' ELSE CASE WHEN rn=1 THEN '.mdf' ELSE '.ndf' END END
-    END AS ext,
-    CASE WHEN @Relocate = 1 THEN
-        CASE WHEN file_type='L'
-            THEN @LogPath  + @TargetDb + CASE WHEN rn=1 THEN '_log' ELSE '_log' + CAST(rn AS varchar(10)) END
-            ELSE @DataPath + @TargetDb + CASE WHEN rn=1 THEN ''     ELSE '_' + CAST(rn AS varchar(10)) END
-        END
-        ELSE physical_name
-    END AS dest_base
+  logical_name,
+  file_type, rn,
+  physical_name,
+  CASE
+    WHEN RIGHT(LOWER(physical_name), 4) IN ('.mdf', '.ndf', '.ldf')
+      THEN RIGHT(physical_name, 4)
+    ELSE CASE WHEN file_type='L' THEN '.ldf' ELSE CASE WHEN rn=1 THEN '.mdf' ELSE '.ndf' END END
+  END AS ext,
+  CASE WHEN 1 = 1 THEN
+      CASE WHEN file_type='L'
+           THEN @LogPath  + @TargetDb + CASE WHEN rn=1 THEN '_log' ELSE '_log' + CAST(rn AS varchar(10)) END
+           ELSE  @DataPath + @TargetDb + CASE WHEN rn=1 THEN ''     ELSE '_' + CAST(rn AS varchar(10)) END
+      END
+      ELSE physical_name
+  END AS dest_base
 INTO #bf2
 FROM x;
 
+-- Tạo lệnh MOVE
 DECLARE @MoveClause nvarchar(max) =
-    STUFF((
-        SELECT
-        N', MOVE N''' + logical_name + N''' TO N''' +
-        REPLACE(dest_base, '''', '''''') + ext + N''''
-        FROM #bf2
-        ORDER BY (CASE WHEN file_type='D' THEN 0 ELSE 1 END), rn
-        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+  STUFF((
+    SELECT
+      N', MOVE N''' + logical_name + N''' TO N''' +
+      REPLACE(dest_base, '''', '''''') + ext + N''''
+    FROM #bf2
+    ORDER BY (CASE WHEN file_type='D' THEN 0 ELSE 1 END), rn
+    FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+
+--print @MoveClause
 
 -- 6) FROM DISK cho FULL/DIFF
 DECLARE @FromBase nvarchar(max) =
-    STUFF((
-        SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
-        FROM #base_files
-        ORDER BY family_sequence_number
-        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+  STUFF((
+    SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
+    FROM #base_files
+    ORDER BY family_sequence_number
+    FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+
+--print @FromBase
+
 
 DECLARE @FromDiff nvarchar(max) = NULL;
 IF EXISTS (SELECT 1 FROM #diff)
 BEGIN
-    SET @FromDiff =
-        STUFF((
-        SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
-        FROM #diff_files
-        ORDER BY family_sequence_number
-        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+  SET @FromDiff =
+    STUFF((
+      SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
+      FROM #diff_files
+      ORDER BY family_sequence_number
+      FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
 END;
 
--- 7) Lắp chuỗi RESTORE
+--print @FromDiff
+
+
+-- 7) Lắp chuỗi RESTORE + (option) SINGLE_USER + TAIL
+
+-- Khởi tạo chuỗi RESTORE chứa toàn bộ câu lệnh
 DECLARE @sql nvarchar(max) = N'';
+
+-- Tạo chuỗi WITH CHECKSUM, STATS = n dùng lặp lại cho nhiều lần RESTORE 
 DECLARE @optsCommon nvarchar(200) =
-    N'WITH ' +
-    CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
-    N'STATS = ' + CAST(@UseStats AS nvarchar(10)) + N', ';
+  N'WITH ' +
+  CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
+  N'STATS = ' + CAST(@UseStats AS nvarchar(10)) + N', ';
 
--- FULL
-SET @sql += N'-- RESTORE FULL' + CHAR(13) +
-    N'RESTORE DATABASE ['+@TargetDb+'] FROM ' + @FromBase + CHAR(13) +
-    @optsCommon +
-    CASE WHEN @Overwrite=1 THEN N'REPLACE, ' ELSE N'' END +
-    N'NORECOVERY' + @MoveClause + N';' + CHAR(13) + CHAR(13);
+-- Biến xác nhận dụng tệp Tail log(true/false)
+DECLARE @WillUseTail bit =
+  CASE WHEN @TailLogFile IS NOT NULL AND @TargetDb = @SourceDb THEN 1 ELSE 0 END; -- Sử dụng Tail khi TailogFile được set và DB Đích trùng với DB gốc (xác nhận ghi đè dữ liệu vào DB gốc)
 
--- DIFF (nếu có)
-IF @FromDiff IS NOT NULL
-    SET @sql += N'-- RESTORE DIFF' + CHAR(13) +
-        N'RESTORE DATABASE ['+@TargetDb+'] FROM ' + @FromDiff + CHAR(13) +
-        @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
+DECLARE @qTargetDb sysname = QUOTENAME(@TargetDb);  -- QUOTENAME() sinh tên như [Docker_DB_Restore], an toàn khi DB có các ký tự đặc biệt, dấu cách, từ khóa (User sẽ thành [User]), ....
 
--- LOGs: tất cả NORECOVERY, file cuối RECOVERY (+ STOPAT nếu có @finalLogId)
-DECLARE @n int = (SELECT COUNT(*) FROM #logs_sel);
-IF @n > 0
+-- Escape mọi dấu ' trong đường dẫn tail (O'Brien.trn → O''Brien.trn). Bắt buộc khi ghép chuỗi T-SQL có '...'.
+DECLARE @TailFileEsc nvarchar(4000) = REPLACE(COALESCE(@TailLogFile,N''), '''', '''''');
+
+-- (A) Độc chiếm quyền kết nối tới DB khi ghi đè DB gốc (Chỉ chạy khi đè DB gốc và bật @ManageSingleUser)
+IF @ManageSingleUser = 1 AND @TargetDb = @SourceDb
 BEGIN
-    DECLARE @i int = 0;
-    DECLARE @media_set_id int, @fromLog nvarchar(max);
-    DECLARE @thisIsFinal bit;
-    DECLARE @finalLogId_local int = @finalLogId;   -- tránh dùng biến ngoài trong cursor
+-- Tạo câu lệnh kill tất cả session đang dùng DB gốc
+-- Sau đó đưa DB vào trạng thái chỉ cho phép 1 kết nối tới DB
+  SET @sql += N'-- Ensure exclusive access (single-user) when overwriting source' + CHAR(13) +
+              N'IF DB_ID(N''' + REPLACE(@TargetDb, '''', '''''') + N''') IS NOT NULL' + CHAR(13) +
+              N'BEGIN' + CHAR(13) +
+              N'  IF (SELECT state_desc FROM sys.databases WHERE name = N''' + REPLACE(@TargetDb, '''', '''''') + N''') = ''ONLINE''' + CHAR(13) +
+              N'  BEGIN' + CHAR(13) +
+              N'    DECLARE @sid int;' + CHAR(13) +
+              N'    DECLARE @sql NVARCHAR(100);' + CHAR(13) +
+              N'    DECLARE kill_c CURSOR LOCAL FOR ' + CHAR(13) +
+              N'      SELECT session_id FROM sys.dm_exec_sessions ' + CHAR(13) +
+              N'      WHERE database_id = DB_ID(N''' + REPLACE(@TargetDb, '''', '''''') + N''') AND session_id <> @@SPID;' + CHAR(13) +
+              N'    OPEN kill_c; FETCH NEXT FROM kill_c INTO @sid;' + CHAR(13) +
+              N'    WHILE @@FETCH_STATUS = 0 BEGIN Set @sql = (''KILL '' + CONVERT(NVARCHAR(20), @sid)); EXEC (@sql); FETCH NEXT FROM kill_c INTO @sid; END' + CHAR(13) +
+              N'    CLOSE kill_c; DEALLOCATE kill_c;' + CHAR(13) +
+              N'    ALTER DATABASE ' + @qTargetDb + N' SET SINGLE_USER WITH ROLLBACK IMMEDIATE;' + CHAR(13) +
+              N'  END' + CHAR(13) +
+              N'END' + CHAR(13) + CHAR(13);
+END
 
-    DECLARE cur CURSOR LOCAL FAST_FORWARD FOR
-        SELECT media_set_id,
-            CASE WHEN backup_set_id = ISNULL(@finalLogId_local, -1) THEN 1 ELSE 0 END AS is_final
-        FROM #logs_sel
-        ORDER BY backup_finish_date ASC;
+-- (B) Tiến hành tạo lệnh RESTORE bản Full backup đầu tiên
+IF @TargetDb = @SourceDb
+	BEGIN
+		SET @sql += N'-- RESTORE FULL' + CHAR(13) +
+		  N'RESTORE DATABASE ' + @qTargetDb + N' FROM ' + @FromBase + CHAR(13) +
+		  @optsCommon +
+		  CASE WHEN @Overwrite=1 THEN N'REPLACE, ' ELSE N'' END +
+		  N'NORECOVERY;' + CHAR(13) + CHAR(13);
+	END
+ELSE
+	BEGIN
+		SET @sql += N'-- RESTORE FULL' + CHAR(13) +
+		  N'RESTORE DATABASE ' + @qTargetDb + N' FROM ' + @FromBase + CHAR(13) +
+		  @optsCommon +
+		  CASE WHEN @Overwrite=1 THEN N'REPLACE, ' ELSE N'' END +
+		  N'NORECOVERY ' + @MoveClause + N';' + CHAR(13) + CHAR(13);
+	END
+-- (C) RESTORE DIFF (nếu có)
+IF @FromDiff IS NOT NULL
+  SET @sql += N'-- RESTORE DIFF' + CHAR(13) +
+    N'RESTORE DATABASE ' + @qTargetDb + N' FROM ' + @FromDiff + CHAR(13) +
+    @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
 
-    OPEN cur; FETCH NEXT FROM cur INTO @media_set_id, @thisIsFinal;
-    WHILE @@FETCH_STATUS = 0
+-- (D) RESTORE LOGs
+IF @hasLogs > 0  -- Nếu có log backup 
+BEGIN
+  DECLARE @media_set_id int, @fromLog nvarchar(max), @isFinal bit;
+  DECLARE cur CURSOR LOCAL FAST_FORWARD FOR
+    SELECT media_set_id,
+           CASE 
+             WHEN @finalLogId IS NOT NULL AND backup_set_id = @finalLogId THEN 1
+             WHEN @finalLogId IS NULL AND backup_set_id = @lastLogId THEN 1
+             ELSE 0
+           END AS is_final
+    FROM #logs_sel
+    ORDER BY backup_finish_date ASC;
+
+  OPEN cur; FETCH NEXT FROM cur INTO @media_set_id, @isFinal;
+  WHILE @@FETCH_STATUS = 0
+  BEGIN
+    SET @fromLog =
+      STUFF((
+        SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
+        FROM msdb.dbo.backupmediafamily
+        WHERE media_set_id = @media_set_id
+        ORDER BY family_sequence_number
+        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+
+    -- Nếu sẽ dùng TAIL cuối chuỗi → tất cả LOG đều NORECOVERY
+    IF @WillUseTail = 1
+      SET @sql += N'RESTORE LOG ' + @qTargetDb + N' FROM ' + @fromLog + CHAR(13) +
+                  @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
+    ELSE
     BEGIN
-        SET @fromLog =
-        STUFF((
-            SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
-            FROM msdb.dbo.backupmediafamily
-            WHERE media_set_id = @media_set_id
-            ORDER BY family_sequence_number
-            FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
-
-        IF @thisIsFinal = 1
-        SET @sql += N'RESTORE LOG ['+@TargetDb+'] FROM ' + @fromLog + CHAR(13) +
+	  -- Đây là LOG cuối & có @finalLogId (tức là có log bao trùm @StopAt trong NGÀY đó) → STOPAT + RECOVERY
+      IF @isFinal = 1 AND @finalLogId IS NOT NULL
+        SET @sql += N'RESTORE LOG ' + @qTargetDb + N' FROM ' + @fromLog + CHAR(13) +
                     N'WITH ' +
                     CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
                     N'STATS = ' + CAST(@UseStats AS nvarchar(10)) +
-                    CASE WHEN @finalLogId IS NOT NULL
-                        THEN N', STOPAT = ''' + CONVERT(nvarchar(23), @StopAt, 121) + N''', RECOVERY'
-                        ELSE N', RECOVERY' END +
-                    N';' + CHAR(13) + CHAR(13);
-        ELSE
-        SET @sql += N'RESTORE LOG ['+@TargetDb+'] FROM ' + @fromLog + CHAR(13) +
-                    @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
+                    N', STOPAT = ''' + CONVERT(nvarchar(23), @StopAt, 121) + N''', RECOVERY;' + CHAR(13) + CHAR(13);
 
-        FETCH NEXT FROM cur INTO @media_set_id, @thisIsFinal;
+	  -- Đây là LOG cuối nhưng KHÔNG có @finalLogId (tức là không có log bao trùm @StopAt) → RECOVERY
+      ELSE IF @isFinal = 1 AND @finalLogId IS NULL
+        SET @sql += N'RESTORE LOG ' + @qTargetDb + N' FROM ' + @fromLog + CHAR(13) +
+                    N'WITH ' +
+                    CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
+                    N'STATS = ' + CAST(@UseStats AS nvarchar(10)) +
+                    N', RECOVERY;' + CHAR(13) + CHAR(13);
+	  -- Các LOG giữa chừng → NORECOVERY
+      ELSE
+        SET @sql += N'RESTORE LOG ' + @qTargetDb + N' FROM ' + @fromLog + CHAR(13) +
+                    @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
     END
-    CLOSE cur; DEALLOCATE cur;
+
+    FETCH NEXT FROM cur INTO @media_set_id, @isFinal;
+  END
+  CLOSE cur; DEALLOCATE cur;
 END
 ELSE
 BEGIN
-    -- Không có LOG bao trùm/đến @StopAt → kết thúc tại DIFF/FULL hiện có
-    SET @sql += N'-- No LOG backup covers @StopAt → recover database at last applied set' + CHAR(13) +
-                N'RESTORE DATABASE ['+@TargetDb+'] WITH RECOVERY;' + CHAR(13) + CHAR(13);
+  -- Không có bất kỳ LOG nào được chọn → RECOVERY tại FULL/DIFF
+  IF @WillUseTail = 0
+    SET @sql += N'-- No LOG backups selected → recover at FULL/DIFF' + CHAR(13) +
+                N'RESTORE DATABASE ' + @qTargetDb + N' WITH RECOVERY;' + CHAR(13) + CHAR(13);
+  -- Nếu sẽ dùng tail: để tail làm bước RECOVERY cuối
 END
 
--- Tóm tắt (không subquery trong PRINT)
+-- (E) TAIL (nếu bật & ghi đè DB gốc)
+IF @WillUseTail = 1
+BEGIN
+  SET @sql += N'-- FINAL: apply TAIL log' + CHAR(13) +
+              N'RESTORE LOG ' + @qTargetDb + N' FROM DISK = N''' + @TailFileEsc + N''' ' + CHAR(13) +
+              N'WITH ' +
+              CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
+              N'STATS = ' + CAST(@UseStats AS nvarchar(10)) +
+              CASE WHEN @StopAt >= '9999-12-31'
+                   THEN N', RECOVERY'
+                   ELSE N', STOPAT = ''' + CONVERT(nvarchar(23), @StopAt, 121) + N''', RECOVERY' END +
+              N';' + CHAR(13) + CHAR(13);
+END
+
+-- (F) Mở lại MULTI_USER (nếu đã SINGLE_USER)
+IF @ManageSingleUser = 1 AND @TargetDb = @SourceDb
+BEGIN
+  SET @sql += N'-- Back to MULTI_USER' + CHAR(13) +
+              N'IF DB_ID(N''' + REPLACE(@TargetDb, '''', '''''') + N''') IS NOT NULL' + CHAR(13) +
+              N'  ALTER DATABASE ' + @qTargetDb + N' SET MULTI_USER;' + CHAR(13) + CHAR(13);
+END
+
+-- TÓM TẮT
 DECLARE @BaseFinish nvarchar(30), @DiffFinish nvarchar(30) = NULL, @LogCount int;
 SELECT @BaseFinish = CONVERT(nvarchar(30), backup_finish_date, 121) FROM #base;
 IF EXISTS (SELECT 1 FROM #diff)
-    SELECT @DiffFinish = CONVERT(nvarchar(30), backup_finish_date, 121) FROM #diff;
+  SELECT @DiffFinish = CONVERT(nvarchar(30), backup_finish_date, 121) FROM #diff;
 SELECT @LogCount = COUNT(*) FROM #logs_sel;
 
 PRINT '--- SUMMARY -------------------------------------------';
-PRINT 'Base FULL: ' + ISNULL(@BaseFinish,'(none)');
-PRINT 'DIFF     : ' + ISNULL(@DiffFinish,'(none)');
-PRINT 'LOG count: ' + CAST(@LogCount AS nvarchar(10));
-PRINT 'Target DB: ' + @TargetDb;
-PRINT 'Relocate : ' + CAST(@Relocate AS nvarchar(10));
-PRINT 'Overwrite: ' + CAST(@Overwrite AS nvarchar(10));
-PRINT 'DryRun   : ' + CAST(@DryRun   AS nvarchar(10));
+PRINT 'Time Restore: ' + CAST(@StopAt AS nvarchar(20));
+PRINT 'Base FULL   : ' + ISNULL(@BaseFinish,'(none)');
+PRINT 'DIFF        : ' + ISNULL(@DiffFinish,'(none)');
+PRINT 'LOG count   : ' + CAST(@LogCount AS nvarchar(10));
+PRINT 'Target DB   : ' + @TargetDb;
+PRINT 'Relocate    : ' + CAST(@Relocate AS nvarchar(10));
+PRINT 'Overwrite   : ' + CAST(@Overwrite AS nvarchar(10));
+PRINT 'Tail file   : ' + ISNULL(@TailLogFile, '(none)');
+PRINT 'DryRun      : ' + CAST(@DryRun   AS nvarchar(10));
 PRINT '-------------------------------------------------------';
 
 IF @DryRun = 1
 BEGIN
-    PRINT @sql;              -- kiểm tra trước
+  PRINT @sql;              -- kiểm tra trước
 END
 ELSE
 BEGIN
-    EXEC sp_executesql @sql; -- thực thi
+  EXEC sp_executesql @sql; -- thực thi
 END
-
 ```
 ### 4.1 SQL Server Agent Jobs (phổ biến nhất)
 Tạo 3 jobs: FULL, DIFF, LOG với T-SQL trên.  
