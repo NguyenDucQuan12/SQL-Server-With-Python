@@ -2190,11 +2190,6 @@ Ví dụ 2 (không có LOG ≥ 10:25 → dừng 10:15):
 Log backups chỉ đến 10:15.  
 `#logs_sel = {log 10:00–10:15}.` 10:00–10:15 là cuối và không có` @finalLogId` ⇒` RESTORE LOG ... WITH RECOVERY (không STOPAT)`, chấp nhận mất 10’.  
 
-
-
-
-
-
 Câu lệnh hoàn chỉnh tự động hóa khôi phục dữ liệu như sau.  
 ```sql
 /* ================================================================
@@ -2650,49 +2645,406 @@ BEGIN
     EXEC sp_executesql @sql; -- thực thi
 END
 ```
-### 4.1 SQL Server Agent Jobs (phổ biến nhất)
-Tạo 3 jobs: FULL, DIFF, LOG với T-SQL trên.  
 
-Lập Schedules tương ứng.  
+### 5.3 Di chuyển các tệp sao lưu tới ổ đĩa khác
 
-Bật Operator + Database Mail để gửi email khi job thất bại.  
+Để tránh để các bản backup `chỉ nằm ở 1 vị trí`, sau khi có bản backup, ta sẽ copy các bản vừa tạo vào một nơi lưu trữ khác bằng đoạn script.  
 
-(Khuyên) Dùng Ola Hallengren’s Maintenance Solution để có Job chuẩn (DatabaseBackup/Integrity/Index).  
+Tạo tệp `Push-Backups.ps1`, lưu nó vào ổ C với đường dẫn: `C:\Scripts\Push-Backups.ps1` như sau:  
+```powershell
+param(
+    [Parameter(Mandatory=$true)] [string]$SourceBase = "E:\SQL_Backup",
+    [Parameter(Mandatory=$true)] [string]$DestBase   = "\\FILESERV\SQL_Backup",
+    [Parameter(Mandatory=$false)][string[]]$Types    = @("Full","Diff","Log"),
+    [Parameter(Mandatory=$false)][string]$Database,           # optional: push 1 DB
+    [int]$Threads = 8,
+    [int]$Retries = 3,
+    [int]$RetryWaitSec = 5,
+    [int]$PerCopyTimeoutSec = 300,
+    [string]$LogFile = "C:\Scripts\push-backups.log"
+)
 
-### 4.2 Tích hợp python  
+# --- Normalize $Types: accept "Full,Diff,Log" or array ---
+if ($null -ne $Types -and $Types.Count -eq 1 -and $Types[0] -match ',') {
+    $Types = $Types[0].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+}
+# (tùy chọn) ép về các giá trị hợp lệ, phòng case sai:
+$valid = @('full','diff','log')
+$Types = $Types | ForEach-Object { $_.Trim() } | Where-Object { $valid -contains $_.ToLower() }
+if (-not $Types -or $Types.Count -eq 0) {
+    Write-Host "No valid -Types provided. Defaulting to Full,Diff,Log."
+    $Types = @('Full','Diff','Log')
+}
+
+function Write-Log {
+    param([string]$msg)
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg"
+    Write-Host $line
+    if ($LogFile) {
+        $dir = Split-Path -Parent $LogFile
+        if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        Add-Content -Path $LogFile -Value $line
+    }
+}
+
+function Test-DestinationReady {
+    param([string]$path)
+    try {
+        if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $path | Out-Null
+        }
+        $probe = Join-Path $path (".probe_{0}.tmp" -f [guid]::NewGuid())
+        Set-Content -LiteralPath $probe -Value "probe" -ErrorAction Stop
+        Remove-Item -LiteralPath $probe -Force -ErrorAction Stop
+        return $true
+    } catch {
+        Write-Log ("Destination NOT ready or write denied: {0} -> {1}" -f $path, $_.Exception.Message)
+        return $false
+    }
+}
+
+function Invoke-RoboCopy {
+    <#
+        Chạy robocopy có kiểm soát timeout; trả về $true nếu coi là thành công
+        Exit code robocopy: 0–7 = OK/Cảnh báo, >=8 = lỗi
+    #>
+    param(
+        [string]$srcDir,
+        [string]$dstDir,
+        [string]$fileMask,      # *.bak | *.dif | *.trn | *.*
+        [int]$timeoutSec = 300  # 0 hoặc âm = không giới hạn
+    )
+
+    if (-not (Test-Path -LiteralPath $srcDir -PathType Container)) {
+        Write-Log ("Source folder not found: {0} (skip)" -f $srcDir)
+        return $true
+    }
+    if (-not (Test-Path -LiteralPath $dstDir -PathType Container)) {
+        try {
+        New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
+        } catch {
+        Write-Log ("Cannot create destination: {0} -> {1}" -f $dstDir, $_.Exception.Message)
+        return $false
+        }
+    }
+
+    $args = @(
+        "`"$srcDir`"", "`"$dstDir`"", $fileMask,
+        "/Z", "/FFT", "/XO",
+        "/R:$Retries", "/W:$RetryWaitSec",
+        "/MT:$Threads",
+        "/NP", "/NFL", "/NDL",
+        "/TEE"
+    )
+    $logTmp = Join-Path $env:TEMP ("robocopy_{0:yyyyMMdd_HHmmss}.log" -f (Get-Date))
+    $args += "/LOG:$logTmp"
+
+    Write-Log ("ROBO: ""{0}"" -> ""{1}"" ({2})" -f $srcDir, $dstDir, $fileMask)
+
+    # Khởi chạy và chờ đúng kiểu .NET
+    $p = Start-Process -FilePath "robocopy.exe" -ArgumentList $args -PassThru -WindowStyle Hidden
+
+    try {
+        if ($timeoutSec -le 0) {
+        # Không giới hạn: chờ đến khi kết thúc
+        $null = $p.WaitForExit()
+        } else {
+        $exited = $p.WaitForExit([int]($timeoutSec * 1000))
+        if (-not $exited) {
+            Write-Log ("Timeout {0}s. Killing robocopy PID {1}" -f $timeoutSec, $p.Id)
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+        }
+
+        $exit = $p.ExitCode
+        if ($exit -ge 8) {
+        Write-Log ("Robocopy failed (exit {0}). See {1}" -f $exit, $logTmp)
+        return $false
+        } else {
+        # 0: nothing to copy; 1: copied; 2–7: warnings but usually acceptable
+        Write-Log ("Robocopy done (exit {0})." -f $exit)
+        return $true
+        }
+    } catch {
+        Write-Log ("Robocopy exception: {0}" -f $_.Exception.Message)
+        return $false
+    }
+}
+
+# ---------------- Main ----------------
+Write-Log ("=== PUSH START: {0} -> {1} | Types: {2} ===" -f $SourceBase, $DestBase, ($Types -join ","))
+
+# Check destination root
+if (-not (Test-DestinationReady -path $DestBase)) {
+    Write-Log "Destination not ready. Skip this run."
+    exit 0
+}
+
+# Check source base
+if (-not (Test-Path -LiteralPath $SourceBase -PathType Container)) {
+    Write-Log ("SourceBase not found: {0}" -f $SourceBase)
+    exit 0
+}
+
+# Collect DB dirs
+$dbDirs = @()
+if ([string]::IsNullOrWhiteSpace($Database)) {
+    $dbDirs = Get-ChildItem -LiteralPath $SourceBase -Directory -ErrorAction SilentlyContinue
+    if (-not $dbDirs -or $dbDirs.Count -eq 0) {
+        Write-Log "No database subfolders under SourceBase. Nothing to push."
+        Write-Log "Tip: expected structure is <SourceBase>\<DB>\<Full|Diff|Log>\<YYYYMMDD>\files"
+        Write-Log "=== PUSH END ==="
+        exit 0
+    }
+} else {
+    $one = Join-Path $SourceBase $Database
+    if (Test-Path -LiteralPath $one -PathType Container) {
+        $dbDirs = ,(Get-Item -LiteralPath $one)
+    } else {
+        Write-Log ("Database folder not found: {0}" -f $one)
+        Write-Log "=== PUSH END ==="
+        exit 0
+    }
+}
+
+Write-Log ("DBs found: {0}" -f (($dbDirs | Select-Object -ExpandProperty Name) -join ", "))
+
+foreach ($db in $dbDirs) {
+    Write-Log ("-- DB: {0}" -f $db.Name)
+    foreach ($t in $Types) {
+        $srcType = Join-Path $db.FullName $t
+        if (-not (Test-Path -LiteralPath $srcType -PathType Container)) {
+            Write-Log ("  Type folder not found: {0} (skip)" -f $srcType)
+            continue
+        }
+
+        # Map extension by type
+        switch ($t.ToLower()) {
+            "full" { $mask = "*.bak" }
+            "diff" { $mask = "*.dif" }
+            "log"  { $mask = "*.trn" }
+            default { $mask = "*.*" }
+        }
+
+        # Prefer day subfolders
+        $dayDirs = Get-ChildItem -LiteralPath $srcType -Directory -ErrorAction SilentlyContinue | Sort-Object Name
+        if ($dayDirs -and $dayDirs.Count -gt 0) {
+            Write-Log ("  Type={0} days: {1}" -f $t, (($dayDirs | Select-Object -ExpandProperty Name) -join ", "))
+            foreach ($dayDir in $dayDirs) {
+                $dstDay = Join-Path (Join-Path (Join-Path $DestBase $db.Name) $t) $dayDir.Name
+                if (-not (Test-DestinationReady -path $dstDay)) {
+                    Write-Log ("  Destination subfolder not ready: {0} (skip this day)" -f $dstDay)
+                    continue
+                }
+                [void](Invoke-RoboCopy -srcDir $dayDir.FullName -dstDir $dstDay -fileMask $mask -timeoutSec $PerCopyTimeoutSec)
+            }
+        } else {
+            # Fallback: no day folders -> push files directly from type folder
+            Write-Log ("  Type={0} has no day folders. Fallback: push files in {1}" -f $t, $srcType)
+            $dstType = Join-Path (Join-Path $DestBase $db.Name) $t
+            if (-not (Test-DestinationReady -path $dstType)) {
+                Write-Log ("  Destination type folder not ready: {0} (skip)" -f $dstType)
+                continue
+            }
+            [void](Invoke-RoboCopy -srcDir $srcType -dstDir $dstType -fileMask $mask -timeoutSec $PerCopyTimeoutSec)
+        }
+    }
+}
+
+Write-Log "=== PUSH END ==="
+```
+
+Tệp này tự động tìm các bản backup tồn tại trong thư mục gốc và copy nó đến các thư mục đích. Nó sẽ tự tạo các thư mục con nếu chưa tồn tại ở thư mục đích.   
+Nếu thư mục đích `là thư mục share` mà không sẵn sàng, bỏ qua lần copy này để không treo, và đi kèm `timeout` để tránh quá thời gian thực thi lệnh thì ko bị kẹt.  
+
+Có thể thử nghiệm với mẫu lệnh sau. Mở `Windows PowerShells` với quyền `Administrator` và chạy lệnh sau để test.  
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Scripts\Push-Backups.ps1" `
+    -SourceBase "E:\SQL_Backup" -DestBase "D:\Backup" `
+    -Database "Docker_DB" `
+    -Types Full,Diff,Log `
+    -Threads 8 -Retries 3 -RetryWaitSec 5 -PerCopyTimeoutSec 300 `
+    -LogFile "C:\Scripts\push-backups.log"
+```
+`Types Full,Diff,Log` không có dấu cách giữa các lần nhập.  
+
+![alt text](Image/copy_backup_file_with_robocopy.png)
+
+Khi chạy thử mà hiển thị như thông báo trên ảnh thì đã thành công. Ta tiến hành đưa nó vào `Task Scheduler` với thời gian tự động chạy là hằng ngày, mỗi `16 phút` để nó tự động copy các tệp tin nhanh nhất có thể.  
+
+Ta có thể xem nhanh một số trạng thái như sau:  
+
+```
+2025-09-19 15:36:10  === PUSH START: E:\SQL_Backup -> D:\Backup | Types: Full,Diff,Log ===
+2025-09-19 15:36:10  DBs found: Docker_DB
+2025-09-19 15:36:10  -- DB: Docker_DB
+2025-09-19 15:36:10    Type=Full days: 20250919
+2025-09-19 15:36:10  ROBO: "E:\SQL_Backup\Docker_DB\Full\20250919" -> "D:\Backup\Docker_DB\Full\20250919" (*.bak)
+2025-09-19 15:36:10  Robocopy done (exit 0).
+2025-09-19 15:36:10    Type=Diff days: 20250919
+2025-09-19 15:36:10  ROBO: "E:\SQL_Backup\Docker_DB\Diff\20250919" -> "D:\Backup\Docker_DB\Diff\20250919" (*.dif)
+2025-09-19 15:36:10  Robocopy done (exit 0).
+2025-09-19 15:36:10    Type=Log days: 20250919
+2025-09-19 15:36:10  ROBO: "E:\SQL_Backup\Docker_DB\Log\20250919" -> "D:\Backup\Docker_DB\Log\20250919" (*.trn)
+2025-09-19 15:36:10  Robocopy done (exit 1).
+2025-09-19 15:36:10  === PUSH END ===
+```
+
+| Exit    | Ý nghĩa |
+| -------- | ------- |
+| 0  | Không có file nào copy (Tệp đã tồn tại)|
+| 1 | Có file được copy     |
+| 2-7    | Cảnh báo (extra/mismatch/skip…)|
+| >8   | Lỗi    |
+
+Có thể thêm vào `Task Scheduler` với đoạn mã sau chạy bằng `Command Prompt` với quyền `Administrator`.  
+
+``` cmd
+schtasks /Create /TN "Push_Backups_15min" /SC DAILY /ST 00:00 /RI 16 /DU 24:00 ^
+  /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\Scripts\Push-Backups.ps1\" -SourceBase \"E:\SQL_Backup\" -DestBase \"\\FILESERV\SQL_Backup\" -Types Full,Diff,Log -Threads 8 -Retries 3 -RetryWaitSec 5 -PerCopyTimeoutSec 300 -LogFile \"C:\Scripts\push-backups.log\"" ^
+  /RL HIGHEST /F
+```
+
+### 5.4 Tự động xóa các bản backup cũ
+
+Sau khi tạo các bản backup, nếu để lâu ngày hoặc CSDL lơn thì việc tốn dung lượng ổ đĩa là không tránh khỏi. Ta nên chủ độn xóa các bản backup cũ, không còn sử dụng đến.  
+- Full: Xóa sau 21 ngày lưu trữ  
+- Diff: Xóa sau 14 ngày lưu trữ  
+- Log: Xóa sau 7 ngày lưu trữ  
+
+Ta tạo tệp script tự động hóa việc này: `C:\Scripts\Cleanup-Old-Backups.ps1`.  
+
+```powershell
+param(
+  [Parameter(Mandatory=$true)]  [string]$BasePath = "E:\SQL_Backup",
+  [Parameter(Mandatory=$false)] [string]$Database,                  # nếu bỏ trống: xử lý tất cả DB trong $BasePath
+  [Parameter(Mandatory=$false)] [int]$FullDays = 21,
+  [Parameter(Mandatory=$false)] [int]$DiffDays = 14,
+  [Parameter(Mandatory=$false)] [int]$LogDays  = 7,
+  [Parameter(Mandatory=$false)] [string]$LogFile = "C:\Scripts\cleanup-backups.log",
+  [switch]$WhatIf                                                  # dry-run (không xóa thực sự)
+)
+
+# --- tiện ích log ---
+function Write-Log {
+    param([string]$msg)
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg"
+    Write-Host $line
+    if ($LogFile) { Add-Content -Path $LogFile -Value $line }
+}
+
+# --- kiểm tra & chuẩn bị ---
+if (-not (Test-Path $BasePath)) {
+    throw "BasePath '$BasePath' not exis."
+}
+# đảm bảo thư mục log tồn tại
+if ($LogFile) {
+    $lp = Split-Path -Parent $LogFile
+    if ($lp -and -not (Test-Path $lp)) { New-Item -ItemType Directory -Force -Path $lp | Out-Null }
+}
+
+Write-Log "=== CLEANUP START: BasePath=$BasePath, DB=$Database, Full=$FullDays d, Diff=$DiffDays d, Log=$LogDays d, WhatIf=$WhatIf ==="
+
+# bản đồ loại → (subfolder, extension, days)
+$rules = @(
+    @{ Type='Full'; Sub='Full'; Ext='.bak'; Days=$FullDays },
+    @{ Type='Diff'; Sub='Diff'; Ext='.dif'; Days=$DiffDays },
+    @{ Type='Log' ; Sub='Log' ; Ext='.trn'; Days=$LogDays  }
+)
+
+# Lấy danh sách DB folder
+$dbFolders = @()
+if ([string]::IsNullOrWhiteSpace($Database)) {
+    $dbFolders = Get-ChildItem -LiteralPath $BasePath -Directory -ErrorAction SilentlyContinue
+} else {
+    $p = Join-Path $BasePath $Database
+    if (-not (Test-Path $p)) {
+        Write-Log "DB '$Database' No folder $p → Next."
+        exit 0
+    }
+    $dbFolders = ,(Get-Item -LiteralPath $p)
+}
+
+foreach ($db in $dbFolders) {
+    Write-Log "-- DB: $($db.Name) --"
+
+    foreach ($r in $rules) {
+        $type   = $r.Type
+        $sub    = $r.Sub
+        $ext    = $r.Ext
+        $days   = [int]$r.Days
+        $cutoff = (Get-Date).AddDays(-$days)
+
+        $typePath = Join-Path $db.FullName $sub
+        if (-not (Test-Path $typePath)) {
+            Write-Log "  [$type] No folder: $typePath → next."
+            continue
+        }
+
+        Write-Log "  [$type] Keep file $days days → delete file *$ext have LastWriteTime < $($cutoff.ToString('yyyy-MM-dd HH:mm:ss'))"
+
+        # Tìm file cần xoá (trong mọi thư mục con YYYYMMDD)
+        $toDelete = Get-ChildItem -LiteralPath $typePath -Recurse -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Extension -ieq $ext -and $_.LastWriteTime -lt $cutoff }
+
+        if (-not $toDelete -or $toDelete.Count -eq 0) {
+            Write-Log "    None one files to delete."
+        } else {
+            foreach ($f in $toDelete) {
+                if ($WhatIf) {
+                Write-Log "    [DRY-RUN] Would remove: $($f.FullName)"
+                } else {
+                try {
+                    Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
+                    Write-Log "    Removed: $($f.FullName)"
+                } catch {
+                    Write-Log "    Delete file error: $($f.FullName) → $($_.Exception.Message)"
+                }
+                }
+            }
+        }
+
+        # Xoá thư mục rỗng (YYYYMMDD) rồi thư mục loại (Full/Diff/Log) nếu rỗng
+        # (chỉ nếu không WhatIf)
+        if (-not $WhatIf) {
+        # Xoá từ dưới lên để dễ rỗng dần
+        $emptyDirs = Get-ChildItem -LiteralPath $typePath -Recurse -Directory -ErrorAction SilentlyContinue |
+                    Sort-Object FullName -Descending
+        foreach ($d in $emptyDirs) {
+            try {
+                if (-not (Get-ChildItem -LiteralPath $d.FullName -Force -ErrorAction SilentlyContinue)) {
+                    Remove-Item -LiteralPath $d.FullName -Force -Recurse -ErrorAction Stop
+                    Write-Log "    Removed empty folder: $($d.FullName)"
+                }
+            } catch {
+                Write-Log "    Delete Folder Error: $($d.FullName) → $($_.Exception.Message)"
+            }
+        }
+
+        # Nếu thư mục loại (Full/Diff/Log) rỗng → xoá
+        try {
+            if (-not (Get-ChildItem -LiteralPath $typePath -Force -ErrorAction SilentlyContinue)) {
+                Remove-Item -LiteralPath $typePath -Force -Recurse -ErrorAction Stop
+                Write-Log "    Removed empty type folder: $typePath"
+            }
+        } catch {
+            Write-Log "    Error Dlete fordel: $typePath → $($_.Exception.Message)"
+            }
+        } else {
+            Write-Log "    [DRY-RUN] Escape delete folder."
+        }
+    }
+}
+
+Write-Log "=== CLEANUP END ==="
+```
+
+
+### 5.3 Tích hợp python  
 Không khuyến khích Python trực tiếp thực thi BACKUP làm “primary path”.  
 
 Python phù hợp để gọi sp_start_job (kích job Agent), đẩy file lên Object Storage, giám sát checksum/kích thước, gửi cảnh báo.  
 
-## 5. Khôi phục cơ sở dữ liệu
 
-### 5.1 Tail-Log Backup
-Nếu DB còn online và muốn tối đa dữ liệu  
-```sql
-BACKUP LOG [YourDB]
-TO DISK = N'\\backup-svr\sql\YourDB\tail\YourDB_TAIL_20250915_1105.trn'
-WITH NO_TRUNCATE, NORECOVERY;  -- đặt DB vào trạng thái restoring
-
-```
-
-### 5.2 Restore full, dif, log,...
-
-```sql -- Full
-RESTORE DATABASE [YourDB]
-FROM DISK = N'...\YourDB_FULL_20250914_1.bak', DISK = N'...\_2.bak'
-WITH NORECOVERY, REPLACE, STATS=10;
-
--- Differential (nếu chạy mỗi ngày)
-RESTORE DATABASE [YourDB]
-FROM DISK = N'...\YourDB_DIFF_20250915.bak'
-WITH NORECOVERY, STATS=10;
-
--- Log đến mốc thời gian (STOPAT)
-RESTORE LOG [YourDB]
-FROM DISK = N'...\YourDB_LOG_20250915_1030.trn'
-WITH NORECOVERY, STATS=10;
-
-RESTORE LOG [YourDB]
-FROM DISK = N'...\YourDB_LOG_20250915_1045.trn'
-WITH RECOVERY, STOPAT = '2025-09-15T10:40:00';  -- ví dụ quay về 10:40
-```
