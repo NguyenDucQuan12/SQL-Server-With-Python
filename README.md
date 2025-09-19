@@ -1050,7 +1050,705 @@ WITH STOPAT = '2025-09-16T10:23:00', RECOVERY, CHECKSUM, STATS = 5;
 
 ## 5. Tự động hóa quá trình
 
-### 5.1 Tự động tìm tệp và đường dẫn sao lưu
+### 5.1 Tạo lệnh Backup tự động
+#### 5.1 Sử dụng SQL Agent
+SQL có công cụ gọi là `SQL Agent` tự động thực thi các lệnh được cài đặt tự động.  `SQL Agent` chỉ khả dụng trên các phiên bản `Develop`, `Standard`, `Enterprise` ... (ngoại trừ bản `SQL Express` và `Local`)  
+
+Ta sẽ tách thành các 3 công việc chính: `Backup_FULL_weekly`, `Backup_DIFF_daily`, `Backup_LOG_15min`.  
+
+Với kiểu lịch WEEKLY (freq_type = 8), freq_interval là bitmask ngày trong tuần của SQL Agnet sẽ như sau:  
+
+- CN=1, T2=2, T3=4, T4=8, T5=16, T6=32, T7=64.  
+- “T2→T7” = 2+4+8+16+32+64 = 126. 
+
+Với `Job Full` được chạy mỗi chủ nhật lúc `00:00:00`:  
+- Đầu tiên ta tạo thư mục theo ngày bằng `PowerShell`: `E:\SQL_Backup\<DB>\<Full|Diff|Log>\<YYYYMMDD>\`   
+- Sau đó backup Full vào thư mục vừa tạo và `VERIFYONLY` để xác thực tệp backup vừa rồi có hỏng hay không.  
+
+```sql
+USE msdb;
+GO
+-- Job: FULL mỗi Chủ nhật 00:00
+EXEC sp_add_job @job_name = N'BK_FULL_weekly', @enabled = 1;
+
+-- Step 1: PowerShell - tạo thư mục E:\SQL_Backup\<DB>\Full\<YYYYMMDD>
+EXEC sp_add_jobstep
+    @job_name = N'BK_FULL_weekly',
+    @step_name = N'CreateFolder',
+    @subsystem = N'PowerShell',
+    @command = N"
+                $Db = 'Docker_DB'
+                $base = 'E:\SQL_Backup'
+                $backup_task = 'Full'
+                $day  = Get-Date -Format 'yyyyMMdd'
+                $path = Join-Path $base (Join-Path $Db (Join-Path $backup_task $day))
+                New-Item -ItemType Directory -Force -Path $path | Out-Null
+    ";
+
+-- Step 2: T-SQL - BACKUP FULL vào đúng thư mục ngày
+EXEC sp_add_jobstep
+    @job_name = N'BK_FULL_weekly',
+    @step_name = N'BackupFull',
+    @subsystem = N'TSQL',
+    @command = N'
+                    DECLARE @db sysname = N''Docker_DB'';
+                    DECLARE @dateFolder nvarchar(20) = CONVERT(nvarchar(8), GETDATE(), 112);         -- YYYYMMDD
+                    DECLARE @timePart   nvarchar(6)  = REPLACE(CONVERT(nvarchar(8), GETDATE(), 108), '':'', ''''); -- HHmmss
+                    DECLARE @dir        nvarchar(4000)= N''E:\SQL_Backup\'' + @db + N''\Full\'' + @dateFolder + N''\'';
+                    DECLARE @file       nvarchar(4000)= @dir + @db + N''_FULL_'' + @timePart + N''.bak'';
+
+                    -- (OPTION) Tự tạo thư mục nếu step PowerShell bị tắt:
+                    EXEC xp_cmdshell N''IF NOT EXIST "''
+                    + REPLACE(@dir, ''"'', ''\"'') + N''" MD "''
+                    + REPLACE(@dir, ''"'', ''\"'') + N''"'', NO_OUTPUT;
+
+                    DECLARE @canCompress bit = CASE WHEN SERVERPROPERTY(''EngineEdition'') = 4 THEN 0 ELSE 1 END; -- 4 = Express
+
+                    DECLARE @sql nvarchar(max) =
+                    N''BACKUP DATABASE '' + QUOTENAME(@db) + N''
+                    TO DISK = N'''''' + REPLACE(@file, '''''', '''''''''') + N''''''''
+                    WITH '' +
+                    CASE WHEN @canCompress=1 THEN N''COMPRESSION, '' ELSE N'''' END +
+                    N''CHECKSUM, STATS=5;''
+                    +
+                    N'' RESTORE VERIFYONLY FROM DISK = N'''''' + REPLACE(@file, '''''', '''''''''') + N'''''''' WITH CHECKSUM;''
+
+                    EXEC (@sql);
+';
+
+-- Schedule: Chủ nhật 00:00
+EXEC sp_add_schedule
+    @schedule_name = N'WEEKLY_SUN_0000',
+    @freq_type = 8,           -- weekly
+    @freq_interval = 1,       -- Sunday
+    @active_start_time = 000000;
+
+EXEC sp_attach_schedule @job_name = N'BK_FULL_weekly', @schedule_name = N'WEEKLY_SUN_0000';
+EXEC sp_add_jobserver  @job_name = N'BK_FULL_weekly';
+GO
+
+```
+Đối với bản `Diff` ta sẽ không backup vào chủ nhật vì đã có bản `backup full` rồi.   
+
+```sql
+USE msdb;
+GO
+EXEC sp_add_job @job_name = N'BK_DIFF_daily_MonSat', @enabled = 1;
+
+EXEC sp_add_jobstep
+    @job_name = N'BK_DIFF_daily_MonSat',
+    @step_name = N'CreateFolder',
+    @subsystem = N'PowerShell',
+    @command = N"
+                $Db = 'Docker_DB'
+                $base = 'E:\SQL_Backup'
+                $backup_task = 'Diff'
+                $day  = Get-Date -Format 'yyyyMMdd'
+                $path = Join-Path $base (Join-Path $Db (Join-Path $backup_task $day))
+                New-Item -ItemType Directory -Force -Path $path | Out-Null
+    ";
+
+EXEC sp_add_jobstep
+    @job_name = N'BK_DIFF_daily_MonSat',
+    @step_name = N'BackupDiff',
+    @subsystem = N'TSQL',
+    @command = N'
+                DECLARE @db sysname = N''Docker_DB'';
+                IF DATENAME(WEEKDAY, GETDATE()) = N''Sunday'' RETURN;  -- phòng trường hợp schedule bị cấu hình nhầm
+
+                DECLARE @dateFolder nvarchar(8) = CONVERT(nvarchar(8), GETDATE(), 112);
+                DECLARE @timePart   nvarchar(6) = REPLACE(CONVERT(nvarchar(8), GETDATE(), 108), '':'', '''');
+                DECLARE @dir  nvarchar(4000)= N''E:\SQL_Backup\'' + @db + N''\Diff\'' + @dateFolder + N''\'';
+                DECLARE @file nvarchar(4000)= @dir + @db + N''_DIFF_'' + @timePart + N''.dif'';
+
+                EXEC xp_cmdshell N''IF NOT EXIST "''
+                + REPLACE(@dir, ''"'', ''\"'') + N''" MD "''
+                + REPLACE(@dir, ''"'', ''\"'') + N''"'', NO_OUTPUT;
+
+                DECLARE @canCompress bit = CASE WHEN SERVERPROPERTY(''EngineEdition'') = 4 THEN 0 ELSE 1 END;
+
+                DECLARE @sql nvarchar(max) =
+                N''BACKUP DATABASE '' + QUOTENAME(@db) + N''
+                TO DISK = N'''''' + REPLACE(@file, '''''', '''''''''') + N''''''''
+                WITH DIFFERENTIAL, '' +
+                CASE WHEN @canCompress=1 THEN N''COMPRESSION, '' ELSE N'''' END +
+                N''CHECKSUM, STATS=5;'';
+
+                EXEC (@sql);
+    ';
+
+-- Schedule: Mon..Sat 00:30
+EXEC sp_add_schedule
+  @schedule_name = N'DIFF_MONSAT_0030',
+  @freq_type = 8,             -- weekly
+  @freq_interval = 126,       -- Mon..Sat (bitmask: 2+4+8+16+32+64)
+  @active_start_time = 003000;
+
+EXEC sp_attach_schedule @job_name = N'BK_DIFF_daily_MonSat', @schedule_name = N'DIFF_MONSAT_0030';
+EXEC sp_add_jobserver  @job_name = N'BK_DIFF_daily_MonSat';
+GO
+
+```
+
+Còn đối với `Log` mỗi `15 phút` ta sẽ tránh thời gian trùng với `Diff` và `Full`. Trước mỗi lần backup ta sẽ kiểm tra xem có lệnh `Diff` hay `Full` đang chạy hay không, nếu có thì bỏ qua lần backup này.  
+
+```sql
+USE msdb;
+GO
+EXEC sp_add_job @job_name = N'BK_LOG_15min', @enabled = 1;
+
+EXEC sp_add_jobstep
+    @job_name   = N'BK_LOG_15min',
+    @step_name  = N'CreateFolder',
+    @subsystem  = N'PowerShell',
+    @command    = N"
+                    $Db = 'Docker_DB'
+                    $base = 'E:\SQL_Backup'
+                    $backup_task = 'Log'
+                    $day  = Get-Date -Format 'yyyyMMdd'
+                    $path = Join-Path $base (Join-Path $Db (Join-Path $backup_task $day))
+                    New-Item -ItemType Directory -Force -Path $path | Out-Null
+    ";
+
+EXEC sp_add_jobstep
+    @job_name   = N'BK_LOG_15min',
+    @step_name  = N'BackupLog_IfNoOtherBackup',
+    @subsystem  = N'TSQL',
+    @command    = N'
+                    IF EXISTS (
+                    SELECT 1
+                    FROM sys.dm_exec_requests
+                    WHERE command IN (''BACKUP DATABASE'', ''BACKUP LOG'')
+                        AND database_id = DB_ID(N''Docker_DB'')
+                    )
+                    BEGIN
+                    PRINT ''A backup is in progress. Skipping LOG backup.'';
+                    RETURN;
+                    END
+
+                    DECLARE @db sysname = N''Docker_DB'';
+                    DECLARE @dateFolder nvarchar(8) = CONVERT(nvarchar(8), GETDATE(), 112);
+                    DECLARE @timePart   nvarchar(6) = REPLACE(CONVERT(nvarchar(8), GETDATE(), 108), '':'', '''');
+                    DECLARE @dir  nvarchar(4000)= N''E:\SQL_Backup\'' + @db + N''\Log\'' + @dateFolder + N''\'';
+                    DECLARE @file nvarchar(4000)= @dir + @db + N''_LOG_'' + @timePart + N''.trn'';
+
+                    DECLARE @sql nvarchar(max) =
+                    N''BACKUP LOG '' + QUOTENAME(@db) + N''
+                    TO DISK = N'''''' + REPLACE(@file, '''''', '''''''''') + N''''''''
+                    WITH CHECKSUM, STATS=5;'';
+
+                    EXEC (@sql);
+            ';
+
+-- Schedule: mỗi 15 phút
+EXEC sp_add_schedule
+    @schedule_name = N'Every_15_Min',
+    @freq_type = 4, @freq_interval = 1,         -- daily
+    @freq_subday_type = 4, @freq_subday_interval = 15,  -- minutes
+    @active_start_time = 000000;
+
+EXEC sp_attach_schedule @job_name = N'BK_LOG_15min', @schedule_name = N'Every_15_Min';
+EXEC sp_add_jobserver  @job_name = N'BK_LOG_15min';
+GO
+
+```
+
+> Bản hoàn chỉnh tự động chạy cho SQL Agent, thêm tham số strip file để chia nhỏ các tệp sao lưu thành nhiều file giúp tăng tốc tốt hơn cho backup  
+
+
+```sql
+/* ===================================================================
+   SQL Agent Jobs: FULL weekly, DIFF Mon–Sat, LOG every 15'
+   - Thư mục: E:\SQL_Backup\<DB>\<Full|Diff|Log>\<YYYYMMDD>\
+   - Striping: @Stripes (số file/backup)
+   - LOG skip khi đang có BACKUP chạy
+   - FULL có VERIFYONLY
+   =================================================================== */
+
+USE msdb;
+GO
+
+/* -------------------------
+   COMMON: tiện ích format thời gian
+   ------------------------- */
+
+IF OBJECT_ID('tempdb..#noop') IS NOT NULL DROP TABLE #noop;
+CREATE TABLE #noop(i int);  -- chỉ để tránh GO segmentation warnings
+
+
+/* =========================
+   JOB 1: FULL (Chủ nhật 00:00)
+   ========================= */
+
+DECLARE @DbName sysname = N'Docker_DB';  -- Tên Database cần backup
+DECLARE @BasePath nvarchar(4000) = N'E:\SQL_Backup';   -- Thư mục lưu trữ, nhớ cấp quyền ghi tệp vào thư mục
+DECLARE @Stripes int = 4; -- số file stripe cho FULL (thường nên chọn 2-4-8)
+
+-- Xóa công việc backup nếu nó đã tồn tại trước đó và thực hiện lại job mới
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'BK_FULL_weekly')
+    EXEC sp_delete_job @job_name = N'BK_FULL_weekly';
+
+EXEC sp_add_job @job_name = N'BK_FULL_weekly', @enabled = 1;
+
+-- STEP 1 (PowerShell): tạo thư mục E:\SQL_Backup\<DB>\Full\<YYYYMMDD>
+EXEC sp_add_jobstep
+    @job_name = N'BK_FULL_weekly',
+    @step_name = N'CreateFolder_Full',
+    @subsystem = N'PowerShell',
+    @command = N"
+                $Db = '" + REPLACE(@DbName,'''','''''') + N"'
+                $base = '" + REPLACE(@BasePath,'''','''''') + N"'
+                $task = 'Full'
+                $day  = Get-Date -Format 'yyyyMMdd'
+                $path = Join-Path $base (Join-Path $Db (Join-Path $task $day))
+                New-Item -ItemType Directory -Force -Path $path | Out-Null
+    ";
+
+-- STEP 2 (T-SQL): BACKUP FULL (striping), VERIFYONLY
+EXEC sp_add_jobstep
+    @job_name = N'BK_FULL_weekly',
+    @step_name = N'BackupFull',
+    @subsystem = N'TSQL',
+    @on_success_action = 1,  -- Quit with success
+    @command = N'
+                DECLARE @Db sysname       = N''' + REPLACE(@DbName,'''','''''') + N''';
+                DECLARE @Base nvarchar(4000) = N''' + REPLACE(@BasePath,'''','''''') + N''';
+                DECLARE @Stripes int = ' + CAST(@Stripes AS nvarchar(10)) + N';
+
+                DECLARE @dateFolder nvarchar(8) = CONVERT(nvarchar(8), GETDATE(), 112);
+                DECLARE @timePart   nvarchar(6) = REPLACE(CONVERT(nvarchar(8), GETDATE(), 108), '':'' , '''');
+                DECLARE @dir        nvarchar(4000) = @Base + N''\'' + @Db + N''\Full\'' + @dateFolder + N''\''; 
+                -- (phòng khi Step1 bị tắt)
+                EXEC xp_cmdshell N''IF NOT EXIST "''
+                + REPLACE(@dir, ''"'', ''\"'') + N''" MD "''
+                + REPLACE(@dir, ''"'', ''\"'') + N''"'', NO_OUTPUT;
+
+                -- Ghép danh sách DISK = N''..._i.bak''
+                DECLARE @targets nvarchar(max) = N'''';
+                DECLARE @i int = 1;
+                WHILE @i <= @Stripes
+                BEGIN
+                SET @targets += CASE WHEN LEN(@targets)=0 THEN N'''''''' ELSE N'', DISK = N'''''' END +
+                                REPLACE(@dir + @Db + N''_FULL_'' + @timePart + N''_'' + CAST(@i AS nvarchar(10)) + N''.bak'', '''''', '''''''''') +
+                                N'''''''';
+                SET @i += 1;
+                END;
+
+                DECLARE @canCompress bit = CASE WHEN SERVERPROPERTY('EngineEdition') = 4 THEN 0 ELSE 1 END; -- 4=Express
+
+                DECLARE @sql nvarchar(max) =
+                N''BACKUP DATABASE '' + QUOTENAME(@Db) + N''
+                TO '' + @targets + N''
+                WITH '' +
+                CASE WHEN @canCompress=1 THEN N''COMPRESSION, '' ELSE N'''' END +
+                N''CHECKSUM, STATS = 5;''
+                + N'' RESTORE VERIFYONLY FROM '' + @targets + N'' WITH CHECKSUM;'';
+
+                EXEC (@sql);
+    ';
+
+-- Schedule: Sunday 00:00
+EXEC sp_add_schedule
+    @schedule_name = N'WEEKLY_SUN_0000',
+    @freq_type = 8, @freq_interval = 1,
+    @active_start_time = 000000;
+EXEC sp_attach_schedule @job_name = N'BK_FULL_weekly', @schedule_name = N'WEEKLY_SUN_0000';
+EXEC sp_add_jobserver  @job_name = N'BK_FULL_weekly';
+GO
+
+
+/* =========================
+   JOB 2: DIFF (Mon..Sat 00:30)
+   ========================= */
+DECLARE @DbName2 sysname = N'Docker_DB';
+DECLARE @BasePath2 nvarchar(4000) = N'E:\SQL_Backup';
+DECLARE @Stripes2 int = 4; -- số file stripe cho DIFF
+
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'BK_DIFF_MonSat')
+    EXEC sp_delete_job @job_name = N'BK_DIFF_MonSat';
+
+EXEC sp_add_job @job_name = N'BK_DIFF_MonSat', @enabled = 1;
+
+EXEC sp_add_jobstep
+    @job_name = N'BK_DIFF_MonSat',
+    @step_name = N'CreateFolder_Diff',
+    @subsystem = N'PowerShell',
+    @command = N"
+                $Db = '" + REPLACE(@DbName2,'''','''''') + N"'
+                $base = '" + REPLACE(@BasePath2,'''','''''') + N"'
+                $task = 'Diff'
+                $day  = Get-Date -Format 'yyyyMMdd'
+                $path = Join-Path $base (Join-Path $Db (Join-Path $task $day))
+                New-Item -ItemType Directory -Force -Path $path | Out-Null
+    ";
+
+EXEC sp_add_jobstep
+    @job_name = N'BK_DIFF_MonSat',
+    @step_name = N'BackupDiff',
+    @subsystem = N'TSQL',
+    @on_success_action = 1,
+    @command = N'
+                DECLARE @Db sysname        = N''' + REPLACE(@DbName2,'''','''''') + N''';
+                DECLARE @Base nvarchar(4000)= N''' + REPLACE(@BasePath2,'''','''''') + N''';
+                DECLARE @Stripes int = ' + CAST(@Stripes2 AS nvarchar(10)) + N';
+
+                IF DATENAME(WEEKDAY, GETDATE()) = N''Sunday'' RETURN; -- an toàn
+
+                DECLARE @dateFolder nvarchar(8) = CONVERT(nvarchar(8), GETDATE(), 112);
+                DECLARE @timePart   nvarchar(6) = REPLACE(CONVERT(nvarchar(8), GETDATE(), 108), '':'' , '''');
+                DECLARE @dir  nvarchar(4000)= @Base + N''\'' + @Db + N''\Diff\'' + @dateFolder + N''\''; 
+                EXEC xp_cmdshell N''IF NOT EXIST "''
+                + REPLACE(@dir, ''"'', ''\"'') + N''" MD "''
+                + REPLACE(@dir, ''"'', ''\"'') + N''"'', NO_OUTPUT;
+
+                DECLARE @targets nvarchar(max) = N'''';
+                DECLARE @i int = 1;
+                WHILE @i <= @Stripes
+                BEGIN
+                SET @targets += CASE WHEN LEN(@targets)=0 THEN N'''''''' ELSE N'', DISK = N'''''' END +
+                                REPLACE(@dir + @Db + N''_DIFF_'' + @timePart + N''_'' + CAST(@i AS nvarchar(10)) + N''.dif'', '''''', '''''''''') +
+                                N'''''''';
+                SET @i += 1;
+                END;
+
+                DECLARE @canCompress bit = CASE WHEN SERVERPROPERTY('EngineEdition') = 4 THEN 0 ELSE 1 END;
+
+                DECLARE @sql nvarchar(max) =
+                N''BACKUP DATABASE '' + QUOTENAME(@Db) + N''
+                TO '' + @targets + N''
+                WITH DIFFERENTIAL, '' +
+                CASE WHEN @canCompress=1 THEN N''COMPRESSION, '' ELSE N'''' END +
+                N''CHECKSUM, STATS = 5;'';
+
+                EXEC (@sql);
+    ';
+
+EXEC sp_add_schedule
+    @schedule_name = N'DIFF_MonSat_0030',
+    @freq_type = 8, @freq_interval = 126,  -- Mon..Sat
+    @active_start_time = 003000;
+EXEC sp_attach_schedule @job_name = N'BK_DIFF_MonSat', @schedule_name = N'DIFF_MonSat_0030';
+EXEC sp_add_jobserver  @job_name = N'BK_DIFF_MonSat';
+GO
+
+
+/* =========================
+   JOB 3: LOG (mỗi 15 phút, cả ngày)
+   ========================= */
+DECLARE @DbName3 sysname = N'Docker_DB';
+DECLARE @BasePath3 nvarchar(4000) = N'E:\SQL_Backup';
+DECLARE @Stripes3 int = 1; -- thường 1 stripe cho LOG; có thể tăng nếu log rất lớn
+
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'BK_LOG_15min')
+    EXEC sp_delete_job @job_name = N'BK_LOG_15min';
+
+EXEC sp_add_job @job_name = N'BK_LOG_15min', @enabled = 1;
+
+EXEC sp_add_jobstep
+    @job_name = N'BK_LOG_15min',
+    @step_name = N'CreateFolder_Log',
+    @subsystem = N'PowerShell',
+    @command = N"
+                $Db = '" + REPLACE(@DbName3,'''','''''') + N"'
+                $base = '" + REPLACE(@BasePath3,'''','''''') + N"'
+                $task = 'Log'
+                $day  = Get-Date -Format 'yyyyMMdd'
+                $path = Join-Path $base (Join-Path $Db (Join-Path $task $day))
+                New-Item -ItemType Directory -Force -Path $path | Out-Null
+    ";
+
+EXEC sp_add_jobstep
+    @job_name = N'BK_LOG_15min',
+    @step_name = N'BackupLog_SkipIfBusy',
+    @subsystem = N'TSQL',
+    @on_success_action = 1,
+    @command = N'
+                IF EXISTS (
+                SELECT 1
+                FROM sys.dm_exec_requests
+                WHERE command IN (''BACKUP DATABASE'', ''BACKUP LOG'')
+                    AND database_id = DB_ID(N''' + REPLACE(@DbName3,'''','''''') + N''')
+                )
+                BEGIN
+                PRINT ''A backup is in progress. Skipping LOG backup.'';
+                RETURN;
+                END
+
+                DECLARE @Db sysname         = N''' + REPLACE(@DbName3,'''','''''') + N''';
+                DECLARE @Base nvarchar(4000)= N''' + REPLACE(@BasePath3,'''','''''') + N''';
+                DECLARE @Stripes int = ' + CAST(@Stripes3 AS nvarchar(10)) + N';
+
+                DECLARE @dateFolder nvarchar(8) = CONVERT(nvarchar(8), GETDATE(), 112);
+                DECLARE @timePart   nvarchar(6) = REPLACE(CONVERT(nvarchar(8), GETDATE(), 108), '':'' , '''');
+                DECLARE @dir  nvarchar(4000)= @Base + N''\'' + @Db + N''\Log\'' + @dateFolder + N''\''; 
+                EXEC xp_cmdshell N''IF NOT EXIST "''
+                + REPLACE(@dir, ''"'', ''\"'') + N''" MD "''
+                + REPLACE(@dir, ''"'', ''\"'') + N''"'', NO_OUTPUT;
+
+                DECLARE @targets nvarchar(max) = N'''';
+                DECLARE @i int = 1;
+                WHILE @i <= @Stripes
+                BEGIN
+                SET @targets += CASE WHEN LEN(@targets)=0 THEN N'''''''' ELSE N'', DISK = N'''''' END +
+                                REPLACE(@dir + @Db + N''_LOG_'' + @timePart + N''_'' + CAST(@i AS nvarchar(10)) + N''.trn'', '''''', '''''''''') +
+                                N'''''''';
+                SET @i += 1;
+                END;
+
+                DECLARE @sql nvarchar(max) =
+                N''BACKUP LOG '' + QUOTENAME(@Db) + N''
+                TO '' + @targets + N''
+                WITH CHECKSUM, STATS = 5;'';
+
+                EXEC (@sql);
+    ';
+
+EXEC sp_add_schedule
+    @schedule_name = N'Every_15_Min',
+    @freq_type = 4, @freq_interval = 1,
+    @freq_subday_type = 4, @freq_subday_interval = 15,
+    @active_start_time = 000000;
+EXEC sp_attach_schedule @job_name = N'BK_LOG_15min', @schedule_name = N'Every_15_Min';
+EXEC sp_add_jobserver  @job_name = N'BK_LOG_15min';
+GO
+```
+
+Và cách để kiểm tra xem `SQL Agent` có đang chạy chạy và các công việc có chạy không.  
+
+```sql
+-- Agent có tồn tại/chạy?
+SELECT servicename, startup_type_desc, status_desc
+FROM sys.dm_server_services
+WHERE servicename LIKE 'SQL Server Agent%';
+
+-- Liệt kê job + trạng thái gần nhất
+SELECT j.name, ja.start_execution_date, ja.stop_execution_date,
+       CASE WHEN ja.start_execution_date IS NOT NULL AND ja.stop_execution_date IS NULL THEN 'Running'
+            ELSE 'Not Running' END AS job_state
+FROM msdb.dbo.sysjobactivity ja
+JOIN msdb.dbo.sysjobs j ON ja.job_id = j.job_id
+WHERE ja.session_id = (SELECT MAX(session_id) FROM msdb.dbo.sysjobactivity)
+ORDER BY j.name;
+```
+
+#### 5.2 Sử dụng cho các SQL không có SQL Agent (Express, Local)
+
+> Sử dụng Task Schedule  
+
+Ta tạo 3 tệp dành cho 3 tác vụ đó là `backup_full.sql`, `backup_diff.sql`, `backup_log.sql`.  
+```sql
+BACKUP DATABASE [Docker_DB]
+TO DISK = N'E:\SQL_Backup\Docker_DB\full\Docker_DB_FULL_$(ESCAPE_SQUOTE(DATE))_$(ESCAPE_SQUOTE(TIME)).bak'
+WITH CHECKSUM, STATS = 5;
+RESTORE VERIFYONLY FROM DISK = N'E:\SQL_Backup\Docker_DB\full\Docker_DB_FULL_$(ESCAPE_SQUOTE(DATE))_$(ESCAPE_SQUOTE(TIME)).bak' WITH CHECKSUM;
+```
+
+Sau đó tạo tác vụ gọi `Scheduler`:  
+```mathematica
+sqlcmd -S .\SQLEXPRESS -E -b -i "E:\scripts\backup_full.sql"
+```
+
+Hoặc có thể sử dụng 1 script cho tất cả các tác vụ.  
+Ta tạo tệp `C:\Scripts\Backup-Db.ps1` để lưu toàn bộ lệnh backup.  
+
+```powershell
+param(
+  [Parameter(Mandatory=$true)] [string]$Instance  = ".\SQLEXPRESS",
+  [Parameter(Mandatory=$true)] [string]$Database  = "Docker_DB",
+  [Parameter(Mandatory=$true)] [string]$BasePath  = "E:\SQL_Backup",
+  [Parameter(Mandatory=$true)] [ValidateSet("Full","Diff","Log")] [string]$Type,
+  [Parameter(Mandatory=$true)] [int]$Stripes      = 1
+)
+
+# 1) Tạo thư mục: E:\SQL_Backup\<DB>\<Type>\<YYYYMMDD>\
+$day = Get-Date -Format "yyyyMMdd"
+$dir = Join-Path $BasePath (Join-Path $Database (Join-Path $Type $day))
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+# 2) Tạo danh sách file striping
+$time   = Get-Date -Format "HHmmss"
+$ext    = if ($Type -eq "Log") { "trn" } elseif ($Type -eq "Diff") { "dif" } else { "bak" }
+$targets = @()
+for ($i=1; $i -le $Stripes; $i++) {
+  $targets += (Join-Path $dir ("{0}_{1}_{2}_{3}.{4}" -f $Database, $Type.ToUpper(), $time, $i, $ext))
+}
+# DISK = N'path' , DISK = N'path2'
+$disks = ($targets | ForEach-Object { "DISK = N'" + $_.Replace("'", "''") + "'" }) -join ", "
+
+# 3) Sinh T-SQL rõ ràng (không “xâu chuỗi phức tạp”)
+if ($Type -eq "Full") {
+  $tsql = @"
+IF SERVERPROPERTY('EngineEdition') <> 4
+BEGIN
+  BACKUP DATABASE [$Database]
+  TO $disks
+  WITH COMPRESSION, CHECKSUM, STATS = 5;
+END
+ELSE
+BEGIN
+  BACKUP DATABASE [$Database]
+  TO $disks
+  WITH CHECKSUM, STATS = 5;
+END;
+RESTORE VERIFYONLY FROM $disks WITH CHECKSUM;
+"@
+}
+elseif ($Type -eq "Diff") {
+  $tsql = @"
+BACKUP DATABASE [$Database]
+TO $disks
+WITH DIFFERENTIAL, CHECKSUM, STATS = 5;
+"@
+}
+else { # Log
+  $tsql = @"
+IF EXISTS (
+  SELECT 1
+  FROM sys.dm_exec_requests
+  WHERE command IN ('BACKUP DATABASE','BACKUP LOG')
+    AND database_id = DB_ID(N'$Database')
+)
+BEGIN
+  PRINT 'Backup in progress. Skipping LOG backup.';
+  RETURN;
+END;
+
+BACKUP LOG [$Database]
+TO $disks
+WITH CHECKSUM, STATS = 5;
+"@
+}
+
+# (Tùy chọn) In ra để bạn xem thử trước khi chạy
+# Write-Host "===== T-SQL to run ====="
+# Write-Host $tsql
+
+# 4) Thực thi qua sqlcmd
+# -NoProfile & -ExecutionPolicy Bypass nên dùng khi gọi từ Task Scheduler, ở đây không cần.
+& sqlcmd -S $Instance -d master -E -b -Q $tsql
+if ($LASTEXITCODE -ne 0) { throw "Backup failed with exit code $LASTEXITCODE" }
+
+Write-Host "Backup $Type completed. Files:"
+$targets | ForEach-Object { Write-Host "  $_" }
+
+```
+
+Có thể test lệnh này như sau:  
+
+> Mở PowerShell và chạy bằng Administrator  
+> C:\Scripts\Backup-Db.ps1 -Instance ".\SQLEXPRESS" -Database "Docker_DB" -BasePath "E:\SQL_Backup" -Type Full -Stripes 2
+> C:\Scripts\Backup-Db.ps1 -Instance ".\SQLEXPRESS" -Database "Docker_DB" -BasePath "E:\SQL_Backup" -Type Diff -Stripes 2
+> C:\Scripts\Backup-Db.ps1 -Instance ".\SQLEXPRESS" -Database "Docker_DB" -BasePath "E:\SQL_Backup" -Type Log  -Stripes 1
+
+![alt text](Image/test_run_backup_SQL_Server_with_ps.png)  
+
+Tạo lệnh backup `Task Scheduler` bằng `Command Prompt` như sau.  
+Tìm kiếm `Command Prompt` và chạy nó với quyền `Administrator`, sau đó chạy từng lệnh bên dưới tương ứng với mỗi tệp backup.  
+`Full backup` vào chủ nhật 00:00  
+```pgsql
+schtasks /Create /TN "BK_FULL_weekly" /SC WEEKLY /D SUN /ST 00:00 ^
+  /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\Scripts\Backup-Db.ps1\" -Instance \".\SQLEXPRESS\" -Database \"Docker_DB\" -BasePath \"E:\SQL_Backup\" -Type Full -Stripes 2" ^
+  /RL HIGHEST /F
+
+```
+
+`Diff backup` vào 00:03 từ T2-T7  
+```pgsql
+schtasks /Create /TN "BK_DIFF_MonSat" /SC WEEKLY /D MON,TUE,WED,THU,FRI,SAT /ST 00:30 /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\Scripts\Backup-Db.ps1\" -Instance \".\SQLEXPRESS\" -Database \"Docker_DB\" -BasePath \"E:\SQL_Backup\" -Type Diff -Stripes 2" /RL HIGHEST /F
+```
+
+`Log backup` chạy hằng ngày mỗi 15 phút ( để 00:01 để tránh trùng 00:00 của full và 00:30 của diff).  
+```pgsql
+schtasks /Create /TN "BK_LOG_15min" /SC DAILY /ST 00:01 /RI 15 /DU 24:00 ^
+  /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\Scripts\Backup-Db.ps1\" -Instance \".\SQLEXPRESS\" -Database \"Docker_DB\" -BasePath \"E:\SQL_Backup\" -Type Log -Stripes 1" ^
+  /RL HIGHEST /F
+```
+
+![alt text](Image/create_diff_task_scheduler_with_cmd.png)  
+
+Cuối cùng vào `Task Scheduler` xem danh sách các nhiệm vụ được lập lịch:  
+
+![alt text](Image/3_task_scheduler_bakup.png)  
+
+
+> Hoặc sử dụng ứng dụng `Task Scheduler` như sau:  
+
+Bước 1: Mở `Task Scheduler` bằng cách bấm `Start` rồi tìm kiếm `Task Scheduler`.  
+
+![alt text](Image/open_task_scheduler.png)  
+
+Sau đó chọn `Action` --> `Create Task ...`  
+
+![alt text](Image/open_create_task_scheduler.png)  
+
+Tiếp theo điền thông tin vào bảng `Ganeral`:  
+
+![alt text](Image/Create_new_task_scheduler.png)
+
+Trong đó:  
+- `Name`: Ta đặt tương ứng với mỗi lần chạy: `BK_FULL_weekly` là cho chạy full (với Diff đặt `BK_DIFF_MonSat`, Log đặt `BK_LOG_15min`).  
+- `Run whether user is logged on or not`:  Để lịch này chạy nền  
+- `Run with highest privileges`: Chạy với quyền Admin  
+- `Configure for: Windows Server/Windows`:  phù hợp máy bạn  
+
+Tiếp theo vào tab `Triggers` chọn `New` và cài đặt các thông số như trong ảnh:  
+
+![alt text](Image/set_trigger_task_scheduler.png)  
+
+Trong đó:  
+- Full backup: Weekly → Sunday → 00:00.  
+- Diff backup: Weekly → check Mon..Sat → 00:30.
+- Log backup: Daily → 00:00 → “Repeat task every” = 15 minutes, “for a duration of” = 1 day.
+
+![alt text](Image/set_trigger_task_scheduler_log_backup.png)  
+
+Tiếp theo chuyển sang tab `Action` và cài đặt như sau:  
+
+- Action = `Start a program`  
+- Program/script: `powershell.exe`  
+
+Và `Arguments` sẽ thay đổi tương ứng với mỗi loại:  
+- Full: `-NoProfile -ExecutionPolicy Bypass -File "C:\Scripts\Backup-Db.ps1" -Instance ".\SQLEXPRESS" -Database "Docker_DB" -BasePath "E:\SQL_Backup" -Type Full -Stripes 2`  
+- Diff: `-NoProfile -ExecutionPolicy Bypass -File "C:\Scripts\Backup-Db.ps1" -Instance ".\SQLEXPRESS" -Database "Docker_DB" -BasePath "E:\SQL_Backup" -Type Diff -Stripes 2`  
+- Log: `-NoProfile -ExecutionPolicy Bypass -File "C:\Scripts\Backup-Db.ps1" -Instance ".\SQLEXPRESS" -Database "Docker_DB" -BasePath "E:\SQL_Backup" -Type Log -Stripes 1`  
+
+> (Option) Start in (optional): C:\Scripts (giúp đường dẫn tương đối, nhưng script đang dùng đường dẫn tuyệt đối nên không bắt buộc).  
+
+Chuyển sang tab `Condition` và bỏ chọn 2 mục:  
+
+- `Start the task only if the computer is on AC power`: Nếu là server cắm điện 24/7 thì ko cần chức năng này  
+- `Stop if the computer switches to battery power`:  Nếu là laptop muốn chạy cả khi dùng pin  
+
+![alt text](Image/set_condition_task_scheduler.png)  
+
+Chuyển sang tab `Settings` và chọn các mục như ảnh:  
+
+![alt text](Image/set_settings_task_scheduler.png)  
+
+- `Allow task to be run on demand`:  để test Run ngay.
+
+- `If the task is already running, then → chọn Do not start a new instance`: Đặc biệt quan trọng cho task LOG để tránh chồng chéo.
+
+- (Tùy chọn) Set Stop the task if it runs longer than 2 hours (FULL/Diff), 30 phút (LOG) — tùy môi trường.
+
+Cuối cùng nhấn `OK` và nhập maatk khẩu tài khoản chạy task, `nên dùng tài khoản có quyền chạy backup và quyền ghi vào thư mục ta đã tạo để lưu trữ tệp backup: E:\SQL_Backup`  
+
+![alt text](Image/set_account_task_scheduler.png)  
+
+Để thử nghiệm thì có thể sử dụng lệnh `Run` và xem kết quả có thực hiện đúng ko.  
+
+![alt text](Image/test_run_powershell_with_task_scheduler.png)  
+
+Có thể đặt thêm hạn vào `metadata` (chỉ ngăn ghi đè bằng cùng media set, không tự xóa file).  
+
+```sql
+BACKUP DATABASE [Docker_DB]
+TO DISK = N'E:\SQL_Backup\Docker_DB\full\Docker_DB_FULL_20250916_000000.bak'
+WITH CHECKSUM, STATS = 5,
+     RETAINDAYS = 14;  -- hoặc EXPIREDATE = '2025-10-01'
+```
+
+### 5.2 Tự động tìm tệp và đường dẫn sao lưu
 Đoạn mã tự động tìm các bản backup tương ứng từ lịch sử backup của DB và ghép chuỗi lại với nhau và khôi phục.  
 
 ```sql
@@ -1476,7 +2174,7 @@ END
 
 Lấy mọi LOG kết thúc trước `@StopAt` → áp với `NORECOVERY`. Nếu có một `LOG` có `backup_finish_date >= @StopAt` → chèn thêm `LOG` đầu tiên đó làm file cuối, lệnh cuối sẽ có `STOPAT = @StopAt + RECOVERY`. Vì mỗi `LOG backup` cũng có thể `striped`, nên ta phải gom list `DISK = '...'` theo media_set_id từng LOG (đúng thứ tự `family_sequence_number`).  
 
-`@thisIsFinal` báo LOG cuối trong chuỗi (bao trùm` @StopAt`)—chỉ `LOG` cuối có `RECOVERY (và có STOPAT nếu cần)`. Nếu không có LOG nào bao trùm được `@StopAt` → khôi phục tới bản cuối cùng trước `@StopAt` và `RECOVERY` luôn (không `STOPAT`).  
+`@thisIsFinal` báo LOG cuối trong chuỗi (bao trùm` @StopAt`) chỉ `LOG` cuối có `RECOVERY (và có STOPAT nếu cần)`. Nếu không có LOG nào bao trùm được `@StopAt` → khôi phục tới bản cuối cùng trước `@StopAt` và `RECOVERY` luôn (không `STOPAT`).  
 
 Ví dụ 1 (có LOG 10:30 → dừng 10:25):  
 `Log backups: 10:00–10:15, 10:15–10:30, 10:30–10:45 …`
@@ -1536,8 +2234,8 @@ IF @StopAt IS NULL SET @StopAt = '9999-12-31';
 -- Kiểm tra msdb có lịch sử backup cho @SourceDb
 IF NOT EXISTS (SELECT 1 FROM msdb.dbo.backupset WHERE database_name = @SourceDb)
 BEGIN
-  RAISERROR(N'Không thấy lịch sử backup của %s trong msdb.', 16, 1, @SourceDb);
-  RETURN;
+    RAISERROR(N'Không thấy lịch sử backup của %s trong msdb.', 16, 1, @SourceDb);
+    RETURN;
 END;
 
 -- 1)Tìm  FULL backup (non COPY_ONLY) trước/bằng Thời điểm khôi phục dữ liệu
@@ -1546,15 +2244,15 @@ SELECT TOP (1) *
 INTO #base
 FROM msdb.dbo.backupset
 WHERE database_name = @SourceDb
-  AND type = 'D'               -- FULL
-  AND is_copy_only = 0
-  AND backup_finish_date <= @StopAt
+    AND type = 'D'               -- FULL
+    AND is_copy_only = 0
+    AND backup_finish_date <= @StopAt
 ORDER BY backup_finish_date DESC;
 
 IF NOT EXISTS (SELECT 1 FROM #base)
 BEGIN
-  RAISERROR(N'Không tìm thấy FULL backup (không COPY_ONLY) trước/bằng @StopAt.', 16, 1);
-  RETURN;
+    RAISERROR(N'Không tìm thấy FULL backup (không COPY_ONLY) trước/bằng @StopAt.', 16, 1);
+    RETURN;
 END;
 
 -- 2) Lấy đường dẫn tới tệp Full backup (nếu stripping thì lấy toàn bộ tệp)
@@ -1568,14 +2266,14 @@ ORDER BY bmf.family_sequence_number;
 -- 3) DIFF khớp base (trước/bằng @StopAt), chỉ cần 1 diff gần nhất với thời gian khôi phục, vì diff là sự khác nhau so với Full trước đó
 IF OBJECT_ID('tempdb..#diff') IS NOT NULL DROP TABLE #diff;
 WITH d AS (
-  SELECT TOP (1) *
-  FROM msdb.dbo.backupset
-  WHERE database_name = @SourceDb
-    AND type = 'I'             -- DIFF
-    AND backup_finish_date <= @StopAt   
-	AND backup_start_date > (SELECT backup_start_date FROM #base)
-    AND differential_base_lsn = (SELECT first_lsn FROM #base)
-  ORDER BY backup_finish_date DESC
+    SELECT TOP (1) *
+    FROM msdb.dbo.backupset
+    WHERE database_name = @SourceDb
+        AND type = 'I'             -- DIFF
+        AND backup_finish_date <= @StopAt   
+        AND backup_start_date > (SELECT backup_start_date FROM #base)
+        AND differential_base_lsn = (SELECT first_lsn FROM #base)
+    ORDER BY backup_finish_date DESC
 )
 SELECT * 
 INTO #diff 
@@ -1585,17 +2283,17 @@ FROM d;
 IF OBJECT_ID('tempdb..#diff_files') IS NOT NULL DROP TABLE #diff_files;
 IF EXISTS (SELECT 1 FROM #diff)
 BEGIN
-  SELECT bmf.physical_device_name, bmf.family_sequence_number
-  INTO #diff_files
-  FROM msdb.dbo.backupmediafamily bmf
-  JOIN #diff d ON bmf.media_set_id = d.media_set_id
-  ORDER BY bmf.family_sequence_number;
+    SELECT bmf.physical_device_name, bmf.family_sequence_number
+    INTO #diff_files
+    FROM msdb.dbo.backupmediafamily bmf
+    JOIN #diff d ON bmf.media_set_id = d.media_set_id
+    ORDER BY bmf.family_sequence_number;
 END;
 
 -- 4) LOGs nối tiếp sau Diff gần nhất (nếu tồn tại diff), hoặc lấy Log sau bản Full gần nhất (khi ko tồn tại bản Diff)
 -- Chuỗi số đánh dấu kết thúc của 1 Diff hoặc Full
 DECLARE @StartLsn numeric(25,0) =
-  COALESCE( (SELECT TOP(1) last_lsn FROM #diff ORDER BY last_lsn DESC), (SELECT last_lsn FROM #base) );
+    COALESCE( (SELECT TOP(1) last_lsn FROM #diff ORDER BY last_lsn DESC), (SELECT last_lsn FROM #base) );
 
 -- Print @StartLsn  -- 40000000269900001
 
@@ -1603,16 +2301,16 @@ DECLARE @StartLsn numeric(25,0) =
 IF OBJECT_ID('tempdb..#logs_all') IS NOT NULL DROP TABLE #logs_all;
 CREATE TABLE #logs_all
 (
-  backup_set_id        int,
-  media_set_id         int,
-  database_name        sysname,
-  [type]               char(1),
-  is_copy_only         bit,
-  backup_start_date    datetime,
-  backup_finish_date   datetime,
-  first_lsn            numeric(25,0),
-  last_lsn             numeric(25,0),
-  database_backup_lsn  numeric(25,0)
+    backup_set_id        int,
+    media_set_id         int,
+    database_name        sysname,
+    [type]               char(1),
+    is_copy_only         bit,
+    backup_start_date    datetime,
+    backup_finish_date   datetime,
+    first_lsn            numeric(25,0),
+    last_lsn             numeric(25,0),
+    database_backup_lsn  numeric(25,0)
 );
 
 -- Lấy tất cả Log backup sau thời điểm bản Diff hoặc Full gần nhất và đưa vào bảng này
@@ -1622,8 +2320,8 @@ SELECT backup_set_id, media_set_id, database_name, [type], is_copy_only,
        backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
 FROM msdb.dbo.backupset
 WHERE database_name = 'Docker_DB'
-  AND [type] = 'L'
-  AND last_lsn > @StartLsn          -- sau FULL/DIFF
+    AND [type] = 'L'
+    AND last_lsn > @StartLsn          -- sau FULL/DIFF
 ORDER BY backup_finish_date ASC;
 
 -- Chọn các LOG cần áp theo logic @StopAt:
@@ -1631,16 +2329,16 @@ ORDER BY backup_finish_date ASC;
 IF OBJECT_ID('tempdb..#logs_sel') IS NOT NULL DROP TABLE #logs_sel;
 CREATE TABLE #logs_sel
 (
-  backup_set_id        int,
-  media_set_id         int,
-  database_name        sysname,
-  [type]               char(1),
-  is_copy_only         bit,
-  backup_start_date    datetime,
-  backup_finish_date   datetime,
-  first_lsn            numeric(25,0),
-  last_lsn             numeric(25,0),
-  database_backup_lsn  numeric(25,0)
+    backup_set_id        int,
+    media_set_id         int,
+    database_name        sysname,
+    [type]               char(1),
+    is_copy_only         bit,
+    backup_start_date    datetime,
+    backup_finish_date   datetime,
+    first_lsn            numeric(25,0),
+    last_lsn             numeric(25,0),
+    database_backup_lsn  numeric(25,0)
 );
 
 -- Lấy danh sách các bản log backup trước thời điểm khôi phục dữ liệu từ bảng logs_all
@@ -1661,12 +2359,12 @@ DECLARE @NextDayStart  datetime = DATEADD(day, 1, @DayStart);                 --
 -- (start >= DayStart và finish < NextDayStart)
 DECLARE @finalLogId int =
 (
-  SELECT TOP (1) backup_set_id
-  FROM #logs_all
-  WHERE backup_finish_date >= @StopAt  --@StopAt
-    AND backup_start_date   >= @DayStart
-    AND backup_finish_date  <  @NextDayStart
-  ORDER BY backup_finish_date ASC
+    SELECT TOP (1) backup_set_id
+    FROM #logs_all
+    WHERE backup_finish_date >= @StopAt  --@StopAt
+        AND backup_start_date   >= @DayStart
+        AND backup_finish_date  <  @NextDayStart
+    ORDER BY backup_finish_date ASC
 );
 
 -- print @finalLogId  --NULL
@@ -1674,12 +2372,12 @@ DECLARE @finalLogId int =
 -- Nếu tồn tại bản log mà chứa thời gian cần khôi phục, thêm nó bảng log_sel
 IF @finalLogId IS NOT NULL
 BEGIN
-  INSERT INTO #logs_sel (backup_set_id, media_set_id, database_name, [type], is_copy_only,
-                         backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn)
-  SELECT backup_set_id, media_set_id, database_name, [type], is_copy_only,
-         backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
-  FROM #logs_all
-  WHERE backup_set_id = @finalLogId;
+    INSERT INTO #logs_sel (backup_set_id, media_set_id, database_name, [type], is_copy_only,
+                            backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn)
+    SELECT backup_set_id, media_set_id, database_name, [type], is_copy_only,
+            backup_start_date, backup_finish_date, first_lsn, last_lsn, database_backup_lsn
+    FROM #logs_all
+    WHERE backup_set_id = @finalLogId;
 END
 
 -- Xác định "log cuối" để đặt tham số RECOVERY:
@@ -1689,9 +2387,9 @@ DECLARE @hasLogs int = (SELECT COUNT(*) FROM #logs_sel);
 -- Lây id của bản Log backup cuối cùng (sắp xếp theo thời gian)
 DECLARE @lastLogId int =
 (
-  SELECT TOP (1) backup_set_id
-  FROM #logs_sel
-  ORDER BY backup_finish_date DESC
+    SELECT TOP (1) backup_set_id
+    FROM #logs_sel
+    ORDER BY backup_finish_date DESC
 );
 
 -- Nếu có @finalLogId ⇒ final là @finalLogId (RECOVERY + STOPAT)
@@ -1700,10 +2398,10 @@ DECLARE @lastLogId int =
 -- 5) MOVE list từ msdb.dbo.backupfile (của FULL base)
 IF OBJECT_ID('tempdb..#bf') IS NOT NULL DROP TABLE #bf;
 SELECT
-  bf.logical_name,
-  bf.physical_name,
-  bf.file_type,        -- 'D' (data) / 'L' (log)
-  bf.file_number
+    bf.logical_name,
+    bf.physical_name,
+    bf.file_type,        -- 'D' (data) / 'L' (log)
+    bf.file_number
 INTO #bf
 FROM msdb.dbo.backupfile bf
 JOIN #base b ON bf.backup_set_id = b.backup_set_id;
@@ -1711,48 +2409,48 @@ JOIN #base b ON bf.backup_set_id = b.backup_set_id;
 -- Tạo đường dẫn để dùng cho lệnh MOVE
 IF OBJECT_ID('tempdb..#bf2') IS NOT NULL DROP TABLE #bf2;
 ;WITH x AS (
-  SELECT *,
-         ROW_NUMBER() OVER (PARTITION BY file_type ORDER BY file_number) AS rn
-  FROM #bf
+    SELECT *,
+            ROW_NUMBER() OVER (PARTITION BY file_type ORDER BY file_number) AS rn
+    FROM #bf
 )
 SELECT
-  logical_name,
-  file_type, rn,
-  physical_name,
-  CASE
-    WHEN RIGHT(LOWER(physical_name), 4) IN ('.mdf', '.ndf', '.ldf')
-      THEN RIGHT(physical_name, 4)
-    ELSE CASE WHEN file_type='L' THEN '.ldf' ELSE CASE WHEN rn=1 THEN '.mdf' ELSE '.ndf' END END
-  END AS ext,
-  CASE WHEN 1 = 1 THEN
-      CASE WHEN file_type='L'
-           THEN @LogPath  + @TargetDb + CASE WHEN rn=1 THEN '_log' ELSE '_log' + CAST(rn AS varchar(10)) END
-           ELSE  @DataPath + @TargetDb + CASE WHEN rn=1 THEN ''     ELSE '_' + CAST(rn AS varchar(10)) END
-      END
-      ELSE physical_name
-  END AS dest_base
+    logical_name,
+    file_type, rn,
+    physical_name,
+    CASE
+        WHEN RIGHT(LOWER(physical_name), 4) IN ('.mdf', '.ndf', '.ldf')
+        THEN RIGHT(physical_name, 4)
+        ELSE CASE WHEN file_type='L' THEN '.ldf' ELSE CASE WHEN rn=1 THEN '.mdf' ELSE '.ndf' END END
+    END AS ext,
+    CASE WHEN 1 = 1 THEN
+        CASE WHEN file_type='L'
+            THEN @LogPath  + @TargetDb + CASE WHEN rn=1 THEN '_log' ELSE '_log' + CAST(rn AS varchar(10)) END
+            ELSE  @DataPath + @TargetDb + CASE WHEN rn=1 THEN ''     ELSE '_' + CAST(rn AS varchar(10)) END
+        END
+        ELSE physical_name
+    END AS dest_base
 INTO #bf2
 FROM x;
 
 -- Tạo lệnh MOVE
 DECLARE @MoveClause nvarchar(max) =
-  STUFF((
-    SELECT
-      N', MOVE N''' + logical_name + N''' TO N''' +
-      REPLACE(dest_base, '''', '''''') + ext + N''''
-    FROM #bf2
-    ORDER BY (CASE WHEN file_type='D' THEN 0 ELSE 1 END), rn
-    FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+    STUFF((
+        SELECT
+        N', MOVE N''' + logical_name + N''' TO N''' +
+        REPLACE(dest_base, '''', '''''') + ext + N''''
+        FROM #bf2
+        ORDER BY (CASE WHEN file_type='D' THEN 0 ELSE 1 END), rn
+        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
 
 --print @MoveClause
 
 -- 6) FROM DISK cho FULL/DIFF
 DECLARE @FromBase nvarchar(max) =
-  STUFF((
-    SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
-    FROM #base_files
-    ORDER BY family_sequence_number
-    FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+    STUFF((
+        SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
+        FROM #base_files
+        ORDER BY family_sequence_number
+        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
 
 --print @FromBase
 
@@ -1760,12 +2458,12 @@ DECLARE @FromBase nvarchar(max) =
 DECLARE @FromDiff nvarchar(max) = NULL;
 IF EXISTS (SELECT 1 FROM #diff)
 BEGIN
-  SET @FromDiff =
-    STUFF((
-      SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
-      FROM #diff_files
-      ORDER BY family_sequence_number
-      FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
+    SET @FromDiff =
+        STUFF((
+        SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
+        FROM #diff_files
+        ORDER BY family_sequence_number
+        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
 END;
 
 --print @FromDiff
@@ -1778,13 +2476,13 @@ DECLARE @sql nvarchar(max) = N'';
 
 -- Tạo chuỗi WITH CHECKSUM, STATS = n dùng lặp lại cho nhiều lần RESTORE 
 DECLARE @optsCommon nvarchar(200) =
-  N'WITH ' +
-  CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
-  N'STATS = ' + CAST(@UseStats AS nvarchar(10)) + N', ';
+    N'WITH ' +
+    CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
+    N'STATS = ' + CAST(@UseStats AS nvarchar(10)) + N', ';
 
 -- Biến xác nhận dụng tệp Tail log(true/false)
 DECLARE @WillUseTail bit =
-  CASE WHEN @TailLogFile IS NOT NULL AND @TargetDb = @SourceDb THEN 1 ELSE 0 END; -- Sử dụng Tail khi TailogFile được set và DB Đích trùng với DB gốc (xác nhận ghi đè dữ liệu vào DB gốc)
+    CASE WHEN @TailLogFile IS NOT NULL AND @TargetDb = @SourceDb THEN 1 ELSE 0 END; -- Sử dụng Tail khi TailogFile được set và DB Đích trùng với DB gốc (xác nhận ghi đè dữ liệu vào DB gốc)
 
 DECLARE @qTargetDb sysname = QUOTENAME(@TargetDb);  -- QUOTENAME() sinh tên như [Docker_DB_Restore], an toàn khi DB có các ký tự đặc biệt, dấu cách, từ khóa (User sẽ thành [User]), ....
 
@@ -1796,139 +2494,139 @@ IF @ManageSingleUser = 1 AND @TargetDb = @SourceDb
 BEGIN
 -- Tạo câu lệnh kill tất cả session đang dùng DB gốc
 -- Sau đó đưa DB vào trạng thái chỉ cho phép 1 kết nối tới DB
-  SET @sql += N'-- Ensure exclusive access (single-user) when overwriting source' + CHAR(13) +
-              N'IF DB_ID(N''' + REPLACE(@TargetDb, '''', '''''') + N''') IS NOT NULL' + CHAR(13) +
-              N'BEGIN' + CHAR(13) +
-              N'  IF (SELECT state_desc FROM sys.databases WHERE name = N''' + REPLACE(@TargetDb, '''', '''''') + N''') = ''ONLINE''' + CHAR(13) +
-              N'  BEGIN' + CHAR(13) +
-              N'    DECLARE @sid int;' + CHAR(13) +
-              N'    DECLARE @sql NVARCHAR(100);' + CHAR(13) +
-              N'    DECLARE kill_c CURSOR LOCAL FOR ' + CHAR(13) +
-              N'      SELECT session_id FROM sys.dm_exec_sessions ' + CHAR(13) +
-              N'      WHERE database_id = DB_ID(N''' + REPLACE(@TargetDb, '''', '''''') + N''') AND session_id <> @@SPID;' + CHAR(13) +
-              N'    OPEN kill_c; FETCH NEXT FROM kill_c INTO @sid;' + CHAR(13) +
-              N'    WHILE @@FETCH_STATUS = 0 BEGIN Set @sql = (''KILL '' + CONVERT(NVARCHAR(20), @sid)); EXEC (@sql); FETCH NEXT FROM kill_c INTO @sid; END' + CHAR(13) +
-              N'    CLOSE kill_c; DEALLOCATE kill_c;' + CHAR(13) +
-              N'    ALTER DATABASE ' + @qTargetDb + N' SET SINGLE_USER WITH ROLLBACK IMMEDIATE;' + CHAR(13) +
-              N'  END' + CHAR(13) +
-              N'END' + CHAR(13) + CHAR(13);
+    SET @sql += N'-- Ensure exclusive access (single-user) when overwriting source' + CHAR(13) +
+                N'IF DB_ID(N''' + REPLACE(@TargetDb, '''', '''''') + N''') IS NOT NULL' + CHAR(13) +
+                N'BEGIN' + CHAR(13) +
+                N'  IF (SELECT state_desc FROM sys.databases WHERE name = N''' + REPLACE(@TargetDb, '''', '''''') + N''') = ''ONLINE''' + CHAR(13) +
+                N'  BEGIN' + CHAR(13) +
+                N'    DECLARE @sid int;' + CHAR(13) +
+                N'    DECLARE @sql NVARCHAR(100);' + CHAR(13) +
+                N'    DECLARE kill_c CURSOR LOCAL FOR ' + CHAR(13) +
+                N'      SELECT session_id FROM sys.dm_exec_sessions ' + CHAR(13) +
+                N'      WHERE database_id = DB_ID(N''' + REPLACE(@TargetDb, '''', '''''') + N''') AND session_id <> @@SPID;' + CHAR(13) +
+                N'    OPEN kill_c; FETCH NEXT FROM kill_c INTO @sid;' + CHAR(13) +
+                N'    WHILE @@FETCH_STATUS = 0 BEGIN Set @sql = (''KILL '' + CONVERT(NVARCHAR(20), @sid)); EXEC (@sql); FETCH NEXT FROM kill_c INTO @sid; END' + CHAR(13) +
+                N'    CLOSE kill_c; DEALLOCATE kill_c;' + CHAR(13) +
+                N'    ALTER DATABASE ' + @qTargetDb + N' SET SINGLE_USER WITH ROLLBACK IMMEDIATE;' + CHAR(13) +
+                N'  END' + CHAR(13) +
+                N'END' + CHAR(13) + CHAR(13);
 END
 
 -- (B) Tiến hành tạo lệnh RESTORE bản Full backup đầu tiên
 IF @TargetDb = @SourceDb
 	BEGIN
 		SET @sql += N'-- RESTORE FULL' + CHAR(13) +
-		  N'RESTORE DATABASE ' + @qTargetDb + N' FROM ' + @FromBase + CHAR(13) +
-		  @optsCommon +
-		  CASE WHEN @Overwrite=1 THEN N'REPLACE, ' ELSE N'' END +
-		  N'NORECOVERY;' + CHAR(13) + CHAR(13);
+            N'RESTORE DATABASE ' + @qTargetDb + N' FROM ' + @FromBase + CHAR(13) +
+            @optsCommon +
+            CASE WHEN @Overwrite=1 THEN N'REPLACE, ' ELSE N'' END +
+            N'NORECOVERY;' + CHAR(13) + CHAR(13);
 	END
 ELSE
 	BEGIN
 		SET @sql += N'-- RESTORE FULL' + CHAR(13) +
-		  N'RESTORE DATABASE ' + @qTargetDb + N' FROM ' + @FromBase + CHAR(13) +
-		  @optsCommon +
-		  CASE WHEN @Overwrite=1 THEN N'REPLACE, ' ELSE N'' END +
-		  N'NORECOVERY ' + @MoveClause + N';' + CHAR(13) + CHAR(13);
+            N'RESTORE DATABASE ' + @qTargetDb + N' FROM ' + @FromBase + CHAR(13) +
+            @optsCommon +
+            CASE WHEN @Overwrite=1 THEN N'REPLACE, ' ELSE N'' END +
+            N'NORECOVERY ' + @MoveClause + N';' + CHAR(13) + CHAR(13);
 	END
 -- (C) RESTORE DIFF (nếu có)
 IF @FromDiff IS NOT NULL
-  SET @sql += N'-- RESTORE DIFF' + CHAR(13) +
-    N'RESTORE DATABASE ' + @qTargetDb + N' FROM ' + @FromDiff + CHAR(13) +
-    @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
+    SET @sql += N'-- RESTORE DIFF' + CHAR(13) +
+        N'RESTORE DATABASE ' + @qTargetDb + N' FROM ' + @FromDiff + CHAR(13) +
+        @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
 
 -- (D) RESTORE LOGs
 IF @hasLogs > 0  -- Nếu có log backup 
 BEGIN
-  DECLARE @media_set_id int, @fromLog nvarchar(max), @isFinal bit;
-  DECLARE cur CURSOR LOCAL FAST_FORWARD FOR
-    SELECT media_set_id,
-           CASE 
-             WHEN @finalLogId IS NOT NULL AND backup_set_id = @finalLogId THEN 1
-             WHEN @finalLogId IS NULL AND backup_set_id = @lastLogId THEN 1
-             ELSE 0
-           END AS is_final
-    FROM #logs_sel
-    ORDER BY backup_finish_date ASC;
+    DECLARE @media_set_id int, @fromLog nvarchar(max), @isFinal bit;
+    DECLARE cur CURSOR LOCAL FAST_FORWARD FOR
+        SELECT media_set_id,
+            CASE 
+                WHEN @finalLogId IS NOT NULL AND backup_set_id = @finalLogId THEN 1
+                WHEN @finalLogId IS NULL AND backup_set_id = @lastLogId THEN 1
+                ELSE 0
+            END AS is_final
+        FROM #logs_sel
+        ORDER BY backup_finish_date ASC;
 
-  OPEN cur; FETCH NEXT FROM cur INTO @media_set_id, @isFinal;
-  WHILE @@FETCH_STATUS = 0
-  BEGIN
-    SET @fromLog =
-      STUFF((
-        SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
-        FROM msdb.dbo.backupmediafamily
-        WHERE media_set_id = @media_set_id
-        ORDER BY family_sequence_number
-        FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
-
-    -- Nếu sẽ dùng TAIL cuối chuỗi → tất cả LOG đều NORECOVERY
-    IF @WillUseTail = 1
-      SET @sql += N'RESTORE LOG ' + @qTargetDb + N' FROM ' + @fromLog + CHAR(13) +
-                  @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
-    ELSE
+    OPEN cur; FETCH NEXT FROM cur INTO @media_set_id, @isFinal;
+    WHILE @@FETCH_STATUS = 0
     BEGIN
-	  -- Đây là LOG cuối & có @finalLogId (tức là có log bao trùm @StopAt trong NGÀY đó) → STOPAT + RECOVERY
-      IF @isFinal = 1 AND @finalLogId IS NOT NULL
-        SET @sql += N'RESTORE LOG ' + @qTargetDb + N' FROM ' + @fromLog + CHAR(13) +
-                    N'WITH ' +
-                    CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
-                    N'STATS = ' + CAST(@UseStats AS nvarchar(10)) +
-                    N', STOPAT = ''' + CONVERT(nvarchar(23), @StopAt, 121) + N''', RECOVERY;' + CHAR(13) + CHAR(13);
+        SET @fromLog =
+        STUFF((
+            SELECT N', DISK = N''' + REPLACE(physical_device_name, '''', '''''') + N''''
+            FROM msdb.dbo.backupmediafamily
+            WHERE media_set_id = @media_set_id
+            ORDER BY family_sequence_number
+            FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '');
 
-	  -- Đây là LOG cuối nhưng KHÔNG có @finalLogId (tức là không có log bao trùm @StopAt) → RECOVERY
-      ELSE IF @isFinal = 1 AND @finalLogId IS NULL
-        SET @sql += N'RESTORE LOG ' + @qTargetDb + N' FROM ' + @fromLog + CHAR(13) +
-                    N'WITH ' +
-                    CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
-                    N'STATS = ' + CAST(@UseStats AS nvarchar(10)) +
-                    N', RECOVERY;' + CHAR(13) + CHAR(13);
-	  -- Các LOG giữa chừng → NORECOVERY
-      ELSE
+        -- Nếu sẽ dùng TAIL cuối chuỗi → tất cả LOG đều NORECOVERY
+        IF @WillUseTail = 1
         SET @sql += N'RESTORE LOG ' + @qTargetDb + N' FROM ' + @fromLog + CHAR(13) +
                     @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
-    END
+        ELSE
+        BEGIN
+        -- Đây là LOG cuối & có @finalLogId (tức là có log bao trùm @StopAt trong NGÀY đó) → STOPAT + RECOVERY
+        IF @isFinal = 1 AND @finalLogId IS NOT NULL
+            SET @sql += N'RESTORE LOG ' + @qTargetDb + N' FROM ' + @fromLog + CHAR(13) +
+                        N'WITH ' +
+                        CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
+                        N'STATS = ' + CAST(@UseStats AS nvarchar(10)) +
+                        N', STOPAT = ''' + CONVERT(nvarchar(23), @StopAt, 121) + N''', RECOVERY;' + CHAR(13) + CHAR(13);
 
-    FETCH NEXT FROM cur INTO @media_set_id, @isFinal;
-  END
-  CLOSE cur; DEALLOCATE cur;
+        -- Đây là LOG cuối nhưng KHÔNG có @finalLogId (tức là không có log bao trùm @StopAt) → RECOVERY
+        ELSE IF @isFinal = 1 AND @finalLogId IS NULL
+            SET @sql += N'RESTORE LOG ' + @qTargetDb + N' FROM ' + @fromLog + CHAR(13) +
+                        N'WITH ' +
+                        CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
+                        N'STATS = ' + CAST(@UseStats AS nvarchar(10)) +
+                        N', RECOVERY;' + CHAR(13) + CHAR(13);
+        -- Các LOG giữa chừng → NORECOVERY
+        ELSE
+            SET @sql += N'RESTORE LOG ' + @qTargetDb + N' FROM ' + @fromLog + CHAR(13) +
+                        @optsCommon + N'NORECOVERY;' + CHAR(13) + CHAR(13);
+        END
+
+        FETCH NEXT FROM cur INTO @media_set_id, @isFinal;
+    END
+    CLOSE cur; DEALLOCATE cur;
 END
 ELSE
 BEGIN
-  -- Không có bất kỳ LOG nào được chọn → RECOVERY tại FULL/DIFF
-  IF @WillUseTail = 0
-    SET @sql += N'-- No LOG backups selected → recover at FULL/DIFF' + CHAR(13) +
-                N'RESTORE DATABASE ' + @qTargetDb + N' WITH RECOVERY;' + CHAR(13) + CHAR(13);
-  -- Nếu sẽ dùng tail: để tail làm bước RECOVERY cuối
+    -- Không có bất kỳ LOG nào được chọn → RECOVERY tại FULL/DIFF
+    IF @WillUseTail = 0
+        SET @sql += N'-- No LOG backups selected → recover at FULL/DIFF' + CHAR(13) +
+                    N'RESTORE DATABASE ' + @qTargetDb + N' WITH RECOVERY;' + CHAR(13) + CHAR(13);
+    -- Nếu sẽ dùng tail: để tail làm bước RECOVERY cuối
 END
 
 -- (E) TAIL (nếu bật & ghi đè DB gốc)
 IF @WillUseTail = 1
 BEGIN
-  SET @sql += N'-- FINAL: apply TAIL log' + CHAR(13) +
-              N'RESTORE LOG ' + @qTargetDb + N' FROM DISK = N''' + @TailFileEsc + N''' ' + CHAR(13) +
-              N'WITH ' +
-              CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
-              N'STATS = ' + CAST(@UseStats AS nvarchar(10)) +
-              CASE WHEN @StopAt >= '9999-12-31'
-                   THEN N', RECOVERY'
-                   ELSE N', STOPAT = ''' + CONVERT(nvarchar(23), @StopAt, 121) + N''', RECOVERY' END +
-              N';' + CHAR(13) + CHAR(13);
+    SET @sql += N'-- FINAL: apply TAIL log' + CHAR(13) +
+                N'RESTORE LOG ' + @qTargetDb + N' FROM DISK = N''' + @TailFileEsc + N''' ' + CHAR(13) +
+                N'WITH ' +
+                CASE WHEN @UseChecksum=1 THEN N'CHECKSUM, ' ELSE N'' END +
+                N'STATS = ' + CAST(@UseStats AS nvarchar(10)) +
+                CASE WHEN @StopAt >= '9999-12-31'
+                    THEN N', RECOVERY'
+                    ELSE N', STOPAT = ''' + CONVERT(nvarchar(23), @StopAt, 121) + N''', RECOVERY' END +
+                N';' + CHAR(13) + CHAR(13);
 END
 
 -- (F) Mở lại MULTI_USER (nếu đã SINGLE_USER)
 IF @ManageSingleUser = 1 AND @TargetDb = @SourceDb
 BEGIN
-  SET @sql += N'-- Back to MULTI_USER' + CHAR(13) +
-              N'IF DB_ID(N''' + REPLACE(@TargetDb, '''', '''''') + N''') IS NOT NULL' + CHAR(13) +
-              N'  ALTER DATABASE ' + @qTargetDb + N' SET MULTI_USER;' + CHAR(13) + CHAR(13);
+    SET @sql += N'-- Back to MULTI_USER' + CHAR(13) +
+                N'IF DB_ID(N''' + REPLACE(@TargetDb, '''', '''''') + N''') IS NOT NULL' + CHAR(13) +
+                N'  ALTER DATABASE ' + @qTargetDb + N' SET MULTI_USER;' + CHAR(13) + CHAR(13);
 END
 
 -- TÓM TẮT
 DECLARE @BaseFinish nvarchar(30), @DiffFinish nvarchar(30) = NULL, @LogCount int;
 SELECT @BaseFinish = CONVERT(nvarchar(30), backup_finish_date, 121) FROM #base;
 IF EXISTS (SELECT 1 FROM #diff)
-  SELECT @DiffFinish = CONVERT(nvarchar(30), backup_finish_date, 121) FROM #diff;
+    SELECT @DiffFinish = CONVERT(nvarchar(30), backup_finish_date, 121) FROM #diff;
 SELECT @LogCount = COUNT(*) FROM #logs_sel;
 
 PRINT '--- SUMMARY -------------------------------------------';
@@ -1945,11 +2643,11 @@ PRINT '-------------------------------------------------------';
 
 IF @DryRun = 1
 BEGIN
-  PRINT @sql;              -- kiểm tra trước
+    PRINT @sql;              -- kiểm tra trước
 END
 ELSE
 BEGIN
-  EXEC sp_executesql @sql; -- thực thi
+    EXEC sp_executesql @sql; -- thực thi
 END
 ```
 ### 4.1 SQL Server Agent Jobs (phổ biến nhất)
