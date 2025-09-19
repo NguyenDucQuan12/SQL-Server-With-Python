@@ -2961,7 +2961,7 @@ if ([string]::IsNullOrWhiteSpace($Database)) {
 } else {
     $p = Join-Path $BasePath $Database
     if (-not (Test-Path $p)) {
-        Write-Log "DB '$Database' No folder $p → Next."
+        Write-Log "DB '$Database' No folder $p to Next."
         exit 0
     }
     $dbFolders = ,(Get-Item -LiteralPath $p)
@@ -2979,11 +2979,11 @@ foreach ($db in $dbFolders) {
 
         $typePath = Join-Path $db.FullName $sub
         if (-not (Test-Path $typePath)) {
-            Write-Log "  [$type] No folder: $typePath → next."
+            Write-Log "  [$type] No folder: $typePath to next."
             continue
         }
 
-        Write-Log "  [$type] Keep file $days days → delete file *$ext have LastWriteTime < $($cutoff.ToString('yyyy-MM-dd HH:mm:ss'))"
+        Write-Log "  [$type] Keep file $days days to delete file *$ext have LastWriteTime < $($cutoff.ToString('yyyy-MM-dd HH:mm:ss'))"
 
         # Tìm file cần xoá (trong mọi thư mục con YYYYMMDD)
         $toDelete = Get-ChildItem -LiteralPath $typePath -Recurse -File -ErrorAction SilentlyContinue |
@@ -3000,7 +3000,7 @@ foreach ($db in $dbFolders) {
                     Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
                     Write-Log "    Removed: $($f.FullName)"
                 } catch {
-                    Write-Log "    Delete file error: $($f.FullName) → $($_.Exception.Message)"
+                    Write-Log "    Delete file error: $($f.FullName) to $($_.Exception.Message)"
                 }
                 }
             }
@@ -3019,18 +3019,18 @@ foreach ($db in $dbFolders) {
                     Write-Log "    Removed empty folder: $($d.FullName)"
                 }
             } catch {
-                Write-Log "    Delete Folder Error: $($d.FullName) → $($_.Exception.Message)"
+                Write-Log "    Delete Folder Error: $($d.FullName) to $($_.Exception.Message)"
             }
         }
 
-        # Nếu thư mục loại (Full/Diff/Log) rỗng → xoá
+        # Nếu thư mục loại (Full/Diff/Log) rỗng to xoá
         try {
             if (-not (Get-ChildItem -LiteralPath $typePath -Force -ErrorAction SilentlyContinue)) {
                 Remove-Item -LiteralPath $typePath -Force -Recurse -ErrorAction Stop
                 Write-Log "    Removed empty type folder: $typePath"
             }
         } catch {
-            Write-Log "    Error Dlete fordel: $typePath → $($_.Exception.Message)"
+            Write-Log "    Error Dlete fordel: $typePath to $($_.Exception.Message)"
             }
         } else {
             Write-Log "    [DRY-RUN] Escape delete folder."
@@ -3039,10 +3039,25 @@ foreach ($db in $dbFolders) {
 }
 
 Write-Log "=== CLEANUP END ==="
+
+```
+Các tùy chọn:  
+- Database: nếu không truyền vào thì tập lệnh quét toàn bộ DB tồn tại trong thư mục `BasePath`.  
+- WhatIf: để thử in ra trước các câu lệnh  
+
+Tập tin sẽ xóa các file cũ trước, sau đó xóa các thư mục rỗng (YYYYMMDD và Full|Diff|Log) để cây gọn gàng.  
+
+Ta có thể chạy thử xem tập lệnh sẽ hiển thị gì bằng cách mở `Windows Powershell` với quyền `Administrator`:  
+
+```cmd
+# chạy thử không xoá, xem log & console
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Scripts\Cleanup-Old-Backups.ps1" `
+  -BasePath "E:\SQL_Backup" -Database "Docker_DB" -FullDays 21 -DiffDays 14 -LogDays 7 -WhatIf
 ```
 
+![alt text](Image/test_run_clean_up_backup_db.png)
 
-### 5.3 Tích hợp python  
+### 5.5 Tích hợp python  
 Không khuyến khích Python trực tiếp thực thi BACKUP làm “primary path”.  
 
 Python phù hợp để gọi sp_start_job (kích job Agent), đẩy file lên Object Storage, giám sát checksum/kích thước, gửi cảnh báo.  
