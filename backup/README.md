@@ -49,19 +49,19 @@ SELECT servicename, service_account
 FROM sys.dm_server_services
 WHERE servicename LIKE 'SQL Server (%';
 ```
-![alt text](Image/get_sql_server.png)  
+![alt text](/Image/get_sql_server.png)  
 
 Sau đó vào thư mục muốn lưu trữ các tệp backup chọn `Properties --> Security`  
 
-![alt text](Image/setting_fordel.png)  
+![alt text](/Image/setting_fordel.png)  
 
 Chọn `Edit` mục `Group or user names` sau đó chọn `Add` và điền tên `service_account` mà ta truy vấn ở câu lệnh trên và sử dụng `Check Names` kiểm tra xem nó có ra tên người dùng không.  
 
-![alt text](Image/add_new_user_names_folder.png) 
+![alt text](/Image/add_new_user_names_folder.png) 
 
 Sau đó nhấn `OK` và tiến hành chọn quyền hạn cho người dùng vừa thêm. Có thể chọn `Full Control` cho tài khoản vừa thêm.  
 
-![alt text](Image/add_fullcontrol_user_folder.png)  
+![alt text](/Image/add_fullcontrol_user_folder.png)  
 
 Như vậy là đã sửa được lỗi `Acess Denied`.  
 
@@ -266,7 +266,7 @@ FROM S
 ORDER BY backup_finish_date;
 ```
 
-![alt text](Image/history_backup_DB.png)  
+![alt text](/Image/history_backup_DB.png)  
 
 Ta đọc dữ liệu như sau:  
 
@@ -1127,7 +1127,7 @@ Có thể test lệnh này như sau:
 > C:\Scripts\Backup-Db.ps1 -Instance ".\SQLEXPRESS" -Database "Docker_DB" -BasePath "E:\SQL_Backup" -Type Diff -Stripes 2
 > C:\Scripts\Backup-Db.ps1 -Instance ".\SQLEXPRESS" -Database "Docker_DB" -BasePath "E:\SQL_Backup" -Type Log  -Stripes 1
 
-![alt text](Image/test_run_backup_SQL_Server_with_ps.png)  
+![alt text](/Image/test_run_backup_SQL_Server_with_ps.png)  
 
 Tạo lệnh backup `Task Scheduler` bằng `Command Prompt` như sau.  
 Tìm kiếm `Command Prompt` và chạy nó với quyền `Administrator`, sau đó chạy từng lệnh bên dưới tương ứng với mỗi tệp backup.  
@@ -1151,26 +1151,26 @@ schtasks /Create /TN "BK_LOG_15min" /SC DAILY /ST 00:01 /RI 15 /DU 24:00 ^
   /RL HIGHEST /F
 ```
 
-![alt text](Image/create_diff_task_scheduler_with_cmd.png)  
+![alt text](/Image/create_diff_task_scheduler_with_cmd.png)  
 
 Cuối cùng vào `Task Scheduler` xem danh sách các nhiệm vụ được lập lịch:  
 
-![alt text](Image/3_task_scheduler_bakup.png)  
+![alt text](/Image/3_task_scheduler_bakup.png)  
 
 
 > Hoặc sử dụng ứng dụng `Task Scheduler` như sau:  
 
 Bước 1: Mở `Task Scheduler` bằng cách bấm `Start` rồi tìm kiếm `Task Scheduler`.  
 
-![alt text](Image/open_task_scheduler.png)  
+![alt text](/Image/open_task_scheduler.png)  
 
 Sau đó chọn `Action` --> `Create Task ...`  
 
-![alt text](Image/open_create_task_scheduler.png)  
+![alt text](/Image/open_create_task_scheduler.png)  
 
 Tiếp theo điền thông tin vào bảng `Ganeral`:  
 
-![alt text](Image/Create_new_task_scheduler.png)
+![alt text](/Image/Create_new_task_scheduler.png)
 
 Trong đó:  
 - `Name`: Ta đặt tương ứng với mỗi lần chạy: `BK_FULL_weekly` là cho chạy full (với Diff đặt `BK_DIFF_MonSat`, Log đặt `BK_LOG_15min`).  
@@ -1180,14 +1180,14 @@ Trong đó:
 
 Tiếp theo vào tab `Triggers` chọn `New` và cài đặt các thông số như trong ảnh:  
 
-![alt text](Image/set_trigger_task_scheduler.png)  
+![alt text](/Image/set_trigger_task_scheduler.png)  
 
 Trong đó:  
 - Full backup: Weekly → Sunday → 00:00.  
 - Diff backup: Weekly → check Mon..Sat → 00:30.
 - Log backup: Daily → 00:00 → “Repeat task every” = 15 minutes, “for a duration of” = 1 day.
 
-![alt text](Image/set_trigger_task_scheduler_log_backup.png)  
+![alt text](/Image/set_trigger_task_scheduler_log_backup.png)  
 
 Tiếp theo chuyển sang tab `Action` và cài đặt như sau:  
 
@@ -1206,11 +1206,11 @@ Chuyển sang tab `Condition` và bỏ chọn 2 mục:
 - `Start the task only if the computer is on AC power`: Nếu là server cắm điện 24/7 thì ko cần chức năng này  
 - `Stop if the computer switches to battery power`:  Nếu là laptop muốn chạy cả khi dùng pin  
 
-![alt text](Image/set_condition_task_scheduler.png)  
+![alt text](/Image/set_condition_task_scheduler.png)  
 
 Chuyển sang tab `Settings` và chọn các mục như ảnh:  
 
-![alt text](Image/set_settings_task_scheduler.png)  
+![alt text](/Image/set_settings_task_scheduler.png)  
 
 - `Allow task to be run on demand`:  để test Run ngay.
 
@@ -1220,11 +1220,11 @@ Chuyển sang tab `Settings` và chọn các mục như ảnh:
 
 Cuối cùng nhấn `OK` và nhập maatk khẩu tài khoản chạy task, `nên dùng tài khoản có quyền chạy backup và quyền ghi vào thư mục ta đã tạo để lưu trữ tệp backup: E:\SQL_Backup`  
 
-![alt text](Image/set_account_task_scheduler.png)  
+![alt text](/Image/set_account_task_scheduler.png)  
 
 Để thử nghiệm thì có thể sử dụng lệnh `Run` và xem kết quả có thực hiện đúng ko.  
 
-![alt text](Image/test_run_powershell_with_task_scheduler.png)  
+![alt text](/Image/test_run_powershell_with_task_scheduler.png)  
 
 Có thể đặt thêm hạn vào `metadata` (chỉ ngăn ghi đè bằng cùng media set, không tự xóa file).  
 
@@ -1271,7 +1271,7 @@ BEGIN
 END;
 ```
 
-![alt text](Image/get_history_backup_DB.png)
+![alt text](/Image/get_history_backup_DB.png)
 
 Ví dụ khi truy vấn lịch sử backup của CSDL `Docker_DB` thì có 15 lần thực hiện gọi lệnh backup bao gồm: `Full`, `Diff`, và `Log`.  
 
@@ -1290,7 +1290,7 @@ ORDER BY backup_finish_date DESC;
 
 Nếu bảng tạm `#base` đã tồn tại từ lần chạy trước thì xóa nó đi, ta tạo lại vào câu lệnh bên dưới để tránh xung đột cấu trúc/ dữ liệu.  
 
-![alt text](Image/get_full_backup_on_time.png)
+![alt text](/Image/get_full_backup_on_time.png)
 
 Ví dụ khi tìm kiếm bản `Full backup` gần nhất với thời gian khôi phục là `2025-09-17T09:52:30` thì kết quả trả về là bản backup thứ 12 là 1 bản `Full backup` gần nhất.  
 Sau đấy kiểm tra xem có bản `Full backup` nào được lưu vào `#base` không. Nếu ko có thì dừng khôi phục và thông báo.  
@@ -1312,7 +1312,7 @@ ORDER BY bmf.family_sequence_number;
 ```
 Trong đó bảng `backupmediafamily` chứa danh sách các đường dẫn file thuộc cùng 1 `media set (tức là cùng trong 1 lần backup)`.  Rồi lưu các đường dẫn này vào bảng `#base_files` để sau này ghép chuỗi `FROM DISK = '1.bak', DISK = '2.bak', ... , 'n.bak'`  
 
-![alt text](Image/get_physical_device_name_full_backup.png)
+![alt text](/Image/get_physical_device_name_full_backup.png)
 Ví dụ với `Docker_DB` thì lần `Full backup` gần nhất tạo ra 4 file, và đường dẫn tương ứng là `E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_20250917_080722_1.bak`, `E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_20250917_080722_2.bak`, `E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_20250917_080722_3.bak`, `E:\SQL_Backup\Docker_DB\Full\Docker_DB_FULL_20250917_080722_4.bak`
 
 Tiếp theo ta tìm `Diff backup` nếu nó tồn tại trong quá trình backup và lưu vào bảng tạm `#diff`.  
@@ -1332,7 +1332,7 @@ SELECT * INTO #diff FROM d;
 
 Ví dụ kiểm tra bản `Diff backup` cho CSDL `Docker_DB` xem có tồn tại đi kèm với bản `Full backup` gần nhất hay không.  
 
-![alt text](Image/get_diff_backup_on_time.png)
+![alt text](/Image/get_diff_backup_on_time.png)
 
 Ta có thể thấy 1 bản ghi `Diff backup` ở lượt backup thứ 13.  
 
@@ -1349,7 +1349,7 @@ BEGIN
 END;
 ```
 
-![alt text](Image/get_physical_device_name_diff_backup.png)
+![alt text](/Image/get_physical_device_name_diff_backup.png)
 
 Ví dụ khi tìm kiếm các bản ghi của `Diff backup` gần nhất, ta có thể thấy bản Diff này được chia (strip) thành 4 tệp nhỏ. Ta cần đầy đủ 4 tệp để có thể khôi phục.  
 
@@ -1449,7 +1449,7 @@ JOIN #base b ON bf.backup_set_id = b.backup_set_id;
 Bảng `backupfile` lưu danh sách file bên trong DB tại thời điểm backup FULL: mỗi dòng là một logical file (data/log), kèm physical_name cũ.  
 Ta dùng nó để sinh `MOVE` tương ứng từng file khi restore.  
 
-![alt text](Image/get_physical_device_name_full_backup_for_move.png)  
+![alt text](/Image/get_physical_device_name_full_backup_for_move.png)  
 
 Ta dùng 2 đường dẫn này phục vụ cho lệnh `MOVE` khi khôi phục dữ liệu sang 1 `Database mới`.  
 Khi đã có đường dẫn để phục vụ lệnh `MOVE`, ta đánh số tệp theo từng loại và quyết định tên/ đích mới.  
@@ -2357,7 +2357,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Scripts\Push-Backups
 ```
 `Types Full,Diff,Log` không có dấu cách giữa các lần nhập.  
 
-![alt text](Image/copy_backup_file_with_robocopy.png)
+![alt text](/Image/copy_backup_file_with_robocopy.png)
 
 Khi chạy thử mà hiển thị như thông báo trên ảnh thì đã thành công. Ta tiến hành đưa nó vào `Task Scheduler` với thời gian tự động chạy là hằng ngày, mỗi `16 phút` để nó tự động copy các tệp tin nhanh nhất có thể.  
 
@@ -2542,7 +2542,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Scripts\Cleanup-Old-
   -BasePath "E:\SQL_Backup" -Database "Docker_DB" -FullDays 21 -DiffDays 14 -LogDays 7 -WhatIf
 ```
 
-![alt text](Image/test_run_clean_up_backup_db.png)
+![alt text](/Image/test_run_clean_up_backup_db.png)
 
 ### 5.5 Tích hợp python  
 Không khuyến khích Python trực tiếp thực thi BACKUP làm “primary path”.  
