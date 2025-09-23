@@ -1139,7 +1139,7 @@ schtasks /Create /TN "BK_FULL_weekly" /SC WEEKLY /D SUN /ST 00:00 ^
 
 ```
 
-`Diff backup` vào 00:03 từ T2-T7  
+`Diff backup` vào 00:30 từ T2-T7  
 ```pgsql
 schtasks /Create /TN "BK_DIFF_MonSat" /SC WEEKLY /D MON,TUE,WED,THU,FRI,SAT /ST 00:30 /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\Scripts\Backup-Db.ps1\" -Instance \".\SQLEXPRESS\" -Database \"Docker_DB\" -BasePath \"E:\SQL_Backup\" -Type Diff -Stripes 2" /RL HIGHEST /F
 ```
@@ -1212,7 +1212,7 @@ Chuyển sang tab `Settings` và chọn các mục như ảnh:
 
 ![alt text](/Image/set_settings_task_scheduler.png)  
 
-- `Allow task to be run on demand`:  để test Run ngay.
+- `Allow task to be run on demand`: Cho phép chương trình thực thi trong nền.
 
 - `If the task is already running, then → chọn Do not start a new instance`: Đặc biệt quan trọng cho task LOG để tránh chồng chéo.
 
@@ -1257,7 +1257,7 @@ DECLARE @DataPath nvarchar(260)= N'D:\SQL_Data\'; -- nơi đặt file .mdf/.ndf 
 DECLARE @LogPath  nvarchar(260)= N'E:\SQL_Log\';  -- nơi đặt file .mdf/.ndf và .ldf (khi @Relocate=1).
 ```
 
-Đầu tiên ta kiểm tra xem thời điểm người dùng muốn khôi phục là đâu, nếu null thì đặt 1 mốc rấ xa để coi như khôi phục tới thời điểm mới nhất.  
+Đầu tiên ta kiểm tra xem thời điểm người dùng muốn khôi phục là đâu, nếu null thì đặt 1 mốc rất xa để coi như khôi phục tới thời điểm mới nhất.  
 ```sql
 IF @StopAt IS NULL SET @StopAt = '9999-12-31';
 ```
